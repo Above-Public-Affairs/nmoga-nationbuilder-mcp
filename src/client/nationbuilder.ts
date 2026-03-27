@@ -119,6 +119,18 @@ export function createNationBuilderClient(
 
         const response = await fetch(url, fetchOptions);
 
+        // Handle auth errors — direct user to re-authorize
+        if (response.status === 401) {
+          const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
+          const authorizeUrl = domain
+            ? `https://${domain}/oauth/authorize`
+            : "/oauth/authorize";
+          throw new Error(
+            `NationBuilder authentication failed. Your access token is missing or expired.\n` +
+            `Re-authorize here: ${authorizeUrl}`
+          );
+        }
+
         // Handle rate limiting
         if (response.status === 429) {
           await rateLimiter.handleError(429);
