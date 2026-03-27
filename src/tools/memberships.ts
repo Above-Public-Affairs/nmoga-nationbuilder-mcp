@@ -133,12 +133,18 @@ export function registerMembershipTools(
     {
       signup_id: z.string().describe("The signup ID of the person to create a membership for"),
       membership_type_id: z.string().describe("The membership type ID"),
+      status: z
+        .string()
+        .default("active")
+        .describe("Membership status: 'active', 'grace period', 'expired', or 'canceled' (default: active)"),
       started_at: z.string().optional().describe("Start date (YYYY-MM-DD)"),
-      expires_on: z.string().optional().describe("Expiration date (YYYY-MM-DD)"),
+      expires_on: z.string().optional().describe("Expiration date (YYYY-MM-DD) — must be today or in the past"),
     },
     async (params) => {
       try {
-        const attributes: Partial<MembershipAttributes> = {};
+        const attributes: Partial<MembershipAttributes> = {
+          status: params.status,
+        };
         if (params.started_at) attributes.started_at = params.started_at;
         if (params.expires_on) attributes.expires_on = params.expires_on;
 
