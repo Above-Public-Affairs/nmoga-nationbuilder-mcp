@@ -18,6 +18,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "crypto";
 import express from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
+import { createOAuthRouter, getOAuthToken, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
 import { registerSignupTools } from "./tools/signups.js";
 import { registerTagTools } from "./tools/tags.js";
 import { registerContactTools } from "./tools/contacts.js";
@@ -28,35 +29,35 @@ import { registerListTools } from "./tools/lists.js";
 // CRITICAL: Never use console.log() - it corrupts JSON-RPC on stdout
 // Always use console.error() for any logging/debugging
 
-function validateEnv(): { slug: string; token: string } {
+function validateEnv(): { slug: string; staticToken: string | null } {
   const slug = process.env.NATIONBUILDER_SLUG;
-  const token = process.env.NATIONBUILDER_ACCESS_TOKEN;
+  const staticToken = process.env.NATIONBUILDER_ACCESS_TOKEN || null;
 
   if (!slug) {
     console.error("Error: NATIONBUILDER_SLUG environment variable is required");
     process.exit(1);
   }
 
-  if (!token) {
+  if (!staticToken && !isOAuthConfigured()) {
     console.error(
-      "Error: NATIONBUILDER_ACCESS_TOKEN environment variable is required"
+      "Warning: No NATIONBUILDER_ACCESS_TOKEN and OAuth not configured. " +
+      "Set NATIONBUILDER_ACCESS_TOKEN or configure OAuth (NATIONBUILDER_CLIENT_ID, NATIONBUILDER_CLIENT_SECRET)."
     );
-    process.exit(1);
   }
 
-  return { slug, token };
+  return { slug, staticToken };
 }
 
 function createServer(
   slug: string,
-  token: string
+  tokenGetter: string | (() => string)
 ): McpServer {
   const server = new McpServer({
     name: "nmoga-nationbuilder-mcp",
     version: "1.0.0",
   });
 
-  const client = createNationBuilderClient(slug, token);
+  const client = createNationBuilderClient(slug, tokenGetter);
 
   // Register all tools
   registerSignupTools(server, client);
@@ -69,18 +70,37 @@ function createServer(
   return server;
 }
 
-async function startSseServer(slug: string, token: string): Promise<void> {
+async function startSseServer(slug: string, staticToken: string | null): Promise<void> {
   const port = parseInt(process.env.PORT || "3000", 10);
   const app = express();
+
+  // Token getter: prefer OAuth token, fall back to static token
+  const getToken = (): string => {
+    const oauthToken = getOAuthToken();
+    if (oauthToken) return oauthToken;
+    if (staticToken) return staticToken;
+    throw new Error("No access token available. Complete OAuth flow at /oauth/authorize or set NATIONBUILDER_ACCESS_TOKEN.");
+  };
 
   // Track active transports by session ID (Streamable HTTP)
   const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
   // Track active SSE transports (legacy)
   const sseTransports = new Map<string, SSEServerTransport>();
 
+  // Mount OAuth routes
+  if (isOAuthConfigured()) {
+    app.use(createOAuthRouter());
+    console.error("OAuth routes enabled: /oauth/authorize, /oauth/callback, /oauth/status");
+  }
+
   // Health check
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", name: "nmoga-nationbuilder-mcp" });
+    const oauthToken = getOAuthToken();
+    res.json({
+      status: "ok",
+      name: "nmoga-nationbuilder-mcp",
+      auth: oauthToken ? "oauth" : staticToken ? "static_token" : "none",
+    });
   });
 
   // Streamable HTTP endpoint — modern mcp-remote uses this
@@ -98,7 +118,7 @@ async function startSseServer(slug: string, token: string): Promise<void> {
         sessionIdGenerator: () => randomUUID(),
       });
 
-      const server = createServer(slug, token);
+      const server = createServer(slug, getToken);
       await server.connect(transport);
 
       // handleRequest processes the initialize and sets the session ID
@@ -139,7 +159,7 @@ async function startSseServer(slug: string, token: string): Promise<void> {
     const sessionId = transport.sessionId;
     sseTransports.set(sessionId, transport);
 
-    const server = createServer(slug, token);
+    const server = createServer(slug, getToken);
 
     res.on("close", () => {
       console.error(`SSE connection closed: ${sessionId}`);
@@ -162,16 +182,30 @@ async function startSseServer(slug: string, token: string): Promise<void> {
     await transport.handlePostMessage(req, res);
   });
 
+  // Refresh OAuth token periodically (every 30 minutes)
+  setInterval(() => {
+    refreshTokenIfNeeded().catch((err) =>
+      console.error("Token refresh interval error:", err)
+    );
+  }, 30 * 60 * 1000);
+
   app.listen(port, () => {
     console.error(`NMOGA NationBuilder MCP server listening on port ${port}`);
     console.error(`Streamable HTTP: http://localhost:${port}/mcp`);
     console.error(`Legacy SSE: http://localhost:${port}/sse`);
     console.error(`Health check: http://localhost:${port}/health`);
+    if (isOAuthConfigured()) {
+      console.error(`OAuth: http://localhost:${port}/oauth/authorize`);
+    }
   });
 }
 
-async function startStdioServer(slug: string, token: string): Promise<void> {
-  const server = createServer(slug, token);
+async function startStdioServer(slug: string, staticToken: string | null): Promise<void> {
+  if (!staticToken) {
+    console.error("Error: NATIONBUILDER_ACCESS_TOKEN is required for stdio mode (OAuth is HTTP-only)");
+    process.exit(1);
+  }
+  const server = createServer(slug, staticToken);
   const transport = new StdioServerTransport();
 
   console.error("Starting NMOGA NationBuilder MCP server (stdio)...");
@@ -183,7 +217,7 @@ async function startStdioServer(slug: string, token: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const { slug, token } = validateEnv();
+  const { slug, staticToken } = validateEnv();
 
   // Set up process handlers
   process.on("SIGTERM", () => {
@@ -209,9 +243,9 @@ async function main(): Promise<void> {
   // If PORT is set, use SSE transport (Railway deployment)
   // Otherwise, use stdio transport (local Claude Desktop)
   if (process.env.PORT) {
-    await startSseServer(slug, token);
+    await startSseServer(slug, staticToken);
   } else {
-    await startStdioServer(slug, token);
+    await startStdioServer(slug, staticToken);
   }
 }
 

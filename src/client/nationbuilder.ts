@@ -24,17 +24,21 @@ export interface NationBuilderClient {
 
 export function createNationBuilderClient(
   slug: string,
-  accessToken: string
+  accessToken: string | (() => string)
 ): NationBuilderClient {
   const baseUrl = `https://${slug}.nationbuilder.com/api/v2`;
   const rateLimiter = new RateLimiter();
   const retryLimit = 3;
 
+  function getToken(): string {
+    return typeof accessToken === "function" ? accessToken() : accessToken;
+  }
+
   function buildHeaders(): Record<string, string> {
     return {
       "Content-Type": "application/json",
       Accept: "application/json",
-      access_token: accessToken,
+      access_token: getToken(),
     };
   }
 
