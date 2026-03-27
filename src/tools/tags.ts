@@ -158,8 +158,8 @@ export function registerTagTools(
       try {
         // First, get the person's taggings to find the tagging IDs
         const taggingsResponse = await client.get<TaggingAttributes>(
-          `signups/${params.person_id}/signup_taggings`,
-          { include: "tag", page_size: 100 }
+          "signup_taggings",
+          { filter: { signup_id: params.person_id }, include: "tag", page_size: 100 }
         );
 
         const results: string[] = [];
