@@ -2,6 +2,7 @@
  * Contact/Interaction logging tools for NationBuilder
  * - log_contact: Log a call, email, meeting, etc.
  * - list_contacts: List interaction history for a person
+ * - update_contact: Update an existing contact record (with overwrite warning)
  */
 
 import { z } from "zod";
@@ -122,6 +123,71 @@ export function registerContactTools(
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error listing contacts: ${error instanceof Error ? error.message : String(error)}` }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "update_contact",
+    "WARNING: OVERWRITES existing fields on a contact/interaction record. Any field you provide will REPLACE the current value. Fields you omit are left unchanged. Verify the contact ID and changes before proceeding.",
+    {
+      contact_id: z.string().describe("The NationBuilder contact ID to update"),
+      type_id: z
+        .string()
+        .optional()
+        .describe("Contact type (e.g., 'call', 'email', 'meeting', 'door_knock', 'other')"),
+      method: z
+        .string()
+        .optional()
+        .describe("How the contact was made (e.g., 'phone', 'in_person', 'online')"),
+      note: z
+        .string()
+        .optional()
+        .describe("Notes about the interaction"),
+      status: z
+        .string()
+        .optional()
+        .describe("Outcome status (e.g., 'answered', 'left_voicemail', 'no_answer')"),
+    },
+    async (params) => {
+      try {
+        const { contact_id, ...fields } = params;
+        const attributes: Partial<ContactAttributes> = {};
+        for (const [key, value] of Object.entries(fields)) {
+          if (value !== undefined) {
+            (attributes as Record<string, unknown>)[key] = value;
+          }
+        }
+
+        if (Object.keys(attributes).length === 0) {
+          return {
+            content: [{ type: "text" as const, text: "No fields to update. Provide at least one field to change." }],
+          };
+        }
+
+        const response = await client.update<ContactAttributes>(
+          "contacts",
+          contact_id,
+          {
+            data: {
+              id: contact_id,
+              type: "contacts",
+              attributes,
+            },
+          }
+        );
+
+        const result = `Contact updated successfully:\n\n${formatContact(response.data)}`;
+
+        return {
+          content: [{ type: "text" as const, text: sanitizeText(result) }],
+        };
+      } catch (error) {
+        reportError({ category: "tool_error", message: "update_contact failed", rawError: error, context: { contact_id: params.contact_id } });
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Error updating contact: ${error instanceof Error ? error.message : String(error)}` }],
         };
       }
     }

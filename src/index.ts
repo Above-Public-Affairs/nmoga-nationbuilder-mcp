@@ -36,6 +36,8 @@ import { registerMailingTools } from "./tools/mailings.js";
 import { registerPageTools } from "./tools/pages.js";
 import { registerAutomationTools } from "./tools/automations.js";
 import { registerImportTools } from "./tools/imports.js";
+import { registerSignupSourceTools } from "./tools/signupSources.js";
+import { registerIdentityMappingTools } from "./tools/identityMappings.js";
 
 // CRITICAL: Never use console.log() - it corrupts JSON-RPC on stdout
 // Always use console.error() for any logging/debugging
@@ -88,6 +90,8 @@ function createServer(
   registerPageTools(server, client);
   registerAutomationTools(server, client);
   registerImportTools(server, client);
+  registerSignupSourceTools(server, client);
+  registerIdentityMappingTools(server, client);
 
   return server;
 }

@@ -286,6 +286,21 @@ export interface AutomationEnrollmentAttributes {
   [key: string]: unknown;
 }
 
+export interface SignupSourceAttributes {
+  source: string | null;
+  source_type: string | null;
+  created_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface IdentityMappingAttributes {
+  external_id: string | null;
+  provider: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
 export interface ImportAttributes {
   status: string | null;
   import_type: string | null;

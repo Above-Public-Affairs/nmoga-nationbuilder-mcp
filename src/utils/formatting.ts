@@ -26,6 +26,8 @@ import type {
   AutomationAttributes,
   AutomationEnrollmentAttributes,
   ImportAttributes,
+  SignupSourceAttributes,
+  IdentityMappingAttributes,
 } from "../types/index.js";
 
 export function formatSignup(resource: JsonApiResource<SignupAttributes>): string {
@@ -384,6 +386,24 @@ export function formatImport(resource: JsonApiResource<ImportAttributes>): strin
   if (a.updated_count != null) lines.push(`  Updated: ${a.updated_count}`);
   if (a.error_count != null) lines.push(`  Errors: ${a.error_count}`);
   if (a.created_at) lines.push(`  Date: ${formatDate(a.created_at)}`);
+  return lines.join("\n");
+}
+
+export function formatSignupSource(resource: JsonApiResource<SignupSourceAttributes>): string {
+  const a = resource.attributes;
+  const lines: string[] = [];
+  lines.push(`**${a.source || "Unknown Source"}** (ID: ${resource.id})`);
+  if (a.source_type) lines.push(`  Type: ${a.source_type}`);
+  if (a.created_at) lines.push(`  Date: ${formatDate(a.created_at)}`);
+  return lines.join("\n");
+}
+
+export function formatIdentityMapping(resource: JsonApiResource<IdentityMappingAttributes>): string {
+  const a = resource.attributes;
+  const lines: string[] = [];
+  lines.push(`**${a.provider || "Mapping"}** (ID: ${resource.id})`);
+  if (a.external_id) lines.push(`  External ID: ${a.external_id}`);
+  if (a.created_at) lines.push(`  Created: ${formatDate(a.created_at)}`);
   return lines.join("\n");
 }
 

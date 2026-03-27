@@ -2,6 +2,7 @@
  * List/Segment tools for NationBuilder
  * - list_lists: List all saved lists/segments
  * - get_list_people: Get people in a specific list
+ * - create_list: Create a new list/segment
  */
 
 import { z } from "zod";
@@ -123,6 +124,42 @@ export function registerListTools(
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error getting list people: ${error instanceof Error ? error.message : String(error)}` }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "create_list",
+    "Creates a NEW saved list/segment in NationBuilder. This does NOT overwrite existing lists.",
+    {
+      name: z.string().describe("Name for the new list"),
+      slug: z.string().optional().describe("URL-friendly slug (auto-generated from name if omitted)"),
+    },
+    async (params) => {
+      try {
+        const attributes: Partial<ListAttributes> = {
+          name: params.name,
+        };
+        if (params.slug) attributes.slug = params.slug;
+
+        const response = await client.create<ListAttributes>("lists", {
+          data: {
+            type: "lists",
+            attributes,
+          },
+        });
+
+        const result = `List created successfully:\n\n${formatList(response.data)}`;
+
+        return {
+          content: [{ type: "text" as const, text: sanitizeText(result) }],
+        };
+      } catch (error) {
+        reportError({ category: "tool_error", message: "create_list failed", rawError: error });
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Error creating list: ${error instanceof Error ? error.message : String(error)}` }],
         };
       }
     }
