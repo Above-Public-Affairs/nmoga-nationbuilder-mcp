@@ -25,6 +25,7 @@ import { registerContactTools } from "./tools/contacts.js";
 import { registerDonationTools } from "./tools/donations.js";
 import { registerEventTools } from "./tools/events.js";
 import { registerListTools } from "./tools/lists.js";
+import { registerRelationshipTools } from "./tools/relationships.js";
 
 // CRITICAL: Never use console.log() - it corrupts JSON-RPC on stdout
 // Always use console.error() for any logging/debugging
@@ -66,6 +67,7 @@ function createServer(
   registerDonationTools(server, client);
   registerEventTools(server, client);
   registerListTools(server, client);
+  registerRelationshipTools(server, client);
 
   return server;
 }
