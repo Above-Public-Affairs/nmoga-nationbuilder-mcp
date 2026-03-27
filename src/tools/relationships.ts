@@ -1,8 +1,8 @@
 /**
  * NationBuilder organization relationship tools
  *
- * Finds people related to organizations by querying signups
- * whose parent_id matches the organization's signup ID.
+ * Finds people related to organizations by looking up the org name
+ * and then searching for signups with a matching employer field.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -11,6 +11,45 @@ import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { SignupAttributes } from "../types/index.js";
 import { formatSignup, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
+
+/** Get the display name of an organization signup */
+async function getOrgName(
+  client: NationBuilderClient,
+  orgId: string
+): Promise<string | null> {
+  try {
+    const doc = await client.getById<SignupAttributes>("signups", orgId);
+    const attrs = doc.data.attributes;
+    return (
+      attrs.full_name ||
+      [attrs.first_name, attrs.last_name].filter(Boolean).join(" ") ||
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Find people whose employer matches a given name */
+async function findPeopleByEmployer(
+  client: NationBuilderClient,
+  employerName: string
+): Promise<{ id: string; attrs: SignupAttributes }[]> {
+  try {
+    const response = await client.get<SignupAttributes>("signups", {
+      filter: { employer: employerName },
+      page_size: 100,
+    });
+    return response.data.map((d) => ({ id: d.id, attrs: d.attributes }));
+  } catch (err) {
+    // If employer filter isn't supported, fall back to parent_id
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("400") || msg.includes("could not find")) {
+      return [];
+    }
+    throw err;
+  }
+}
 
 export function registerRelationshipTools(
   server: McpServer,
@@ -26,26 +65,68 @@ export function registerRelationshipTools(
     },
     async (params) => {
       try {
-        // Find signups whose parent is this organization
-        const response = await client.get<SignupAttributes>("signups", {
-          filter: { parent_id: params.org_id },
-          page_size: 100,
-        });
-
-        if (response.data.length === 0) {
+        // Step 1: Get the org name
+        const orgName = await getOrgName(client, params.org_id);
+        if (!orgName) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `No people found related to organization ${params.org_id}.`,
+                text: `Could not find organization with ID ${params.org_id}.`,
               },
             ],
           };
         }
 
-        let result = `Found ${response.data.length} people related to org ${params.org_id}:\n\n`;
-        for (const person of response.data) {
-          result += formatSignup(person) + "\n\n";
+        // Step 2: Find people by employer match
+        let people = await findPeopleByEmployer(client, orgName);
+
+        // Step 3: Also try parent_id filter
+        try {
+          const parentResponse = await client.get<SignupAttributes>(
+            "signups",
+            {
+              filter: { parent_id: params.org_id },
+              page_size: 100,
+            }
+          );
+          const existingIds = new Set(people.map((p) => p.id));
+          for (const person of parentResponse.data) {
+            if (!existingIds.has(person.id)) {
+              people.push({
+                id: person.id,
+                attrs: person.attributes,
+              });
+            }
+          }
+        } catch {
+          // parent_id filter may not work — that's ok
+        }
+
+        if (people.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `No people found related to organization "${orgName}" (ID: ${params.org_id}).`,
+              },
+            ],
+          };
+        }
+
+        let result = `Found ${people.length} people related to **${orgName}** (ID: ${params.org_id}):\n\n`;
+        for (const person of people) {
+          const name =
+            person.attrs.full_name ||
+            [person.attrs.first_name, person.attrs.last_name]
+              .filter(Boolean)
+              .join(" ") ||
+            `ID ${person.id}`;
+          const email = person.attrs.email ? ` — ${person.attrs.email}` : "";
+          const occupation = person.attrs.occupation
+            ? `, ${person.attrs.occupation}`
+            : "";
+          result += `- **${name}**${email}${occupation} [ID: ${person.id}]\n`;
         }
 
         return {
@@ -100,31 +181,32 @@ export function registerRelationshipTools(
 
       const allMembers: Map<
         string,
-        { name: string; email: string; employer: string; orgName: string }
+        { name: string; email: string; occupation: string; orgName: string }
       > = new Map();
-      const orgNames: Map<string, string> = new Map();
       const errors: string[] = [];
 
       for (const orgId of ids) {
         try {
-          const response = await client.get<SignupAttributes>("signups", {
-            filter: { parent_id: orgId },
-            page_size: 100,
-          });
+          // Get org name
+          const orgName = await getOrgName(client, orgId);
+          if (!orgName) {
+            errors.push(orgId);
+            continue;
+          }
 
-          for (const person of response.data) {
-            const attrs = person.attributes;
+          // Find people by employer
+          const people = await findPeopleByEmployer(client, orgName);
+          for (const person of people) {
             const name =
-              attrs.full_name ||
-              [attrs.first_name, attrs.last_name]
+              person.attrs.full_name ||
+              [person.attrs.first_name, person.attrs.last_name]
                 .filter(Boolean)
                 .join(" ") ||
               `ID ${person.id}`;
-            const orgName = orgNames.get(orgId) || orgId;
             allMembers.set(person.id, {
               name,
-              email: attrs.email || "",
-              employer: attrs.employer || "",
+              email: person.attrs.email || "",
+              occupation: person.attrs.occupation || "",
               orgName,
             });
           }
@@ -139,13 +221,13 @@ export function registerRelationshipTools(
       if (allMembers.size > 0) {
         for (const [id, info] of allMembers) {
           const email = info.email ? ` — ${info.email}` : "";
-          const employer = info.employer ? ` (${info.employer})` : "";
-          result += `- **${info.name}**${email}${employer} [ID: ${id}]\n`;
+          const occupation = info.occupation ? `, ${info.occupation}` : "";
+          result += `- **${info.name}**${email}${occupation} (${info.orgName}) [ID: ${id}]\n`;
         }
       }
 
       if (errors.length > 0) {
-        result += `\n---\nCould not query relationships for ${errors.length} org(s): ${errors.join(", ")}`;
+        result += `\n---\nCould not query ${errors.length} org(s): ${errors.join(", ")}`;
       }
 
       return {
