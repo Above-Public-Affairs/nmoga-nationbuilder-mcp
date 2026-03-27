@@ -39,7 +39,7 @@ export function createNationBuilderClient(
     return {
       "Content-Type": "application/json",
       Accept: "application/json",
-      access_token: getToken(),
+      Authorization: `Bearer ${getToken()}`,
     };
   }
 

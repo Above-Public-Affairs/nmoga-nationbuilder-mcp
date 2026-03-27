@@ -12,6 +12,7 @@
 
 ### Fixed
 - When NationBuilder returns a 401 auth error, tools now show a direct link to re-authorize instead of a cryptic error message
+- Fixed auth header: switched from `access_token` header to `Authorization: Bearer` for NB V2 OAuth compatibility
 
 ### Added
 - Auto-refresh on 401: if the token expires mid-session, the server automatically refreshes it and retries the request
