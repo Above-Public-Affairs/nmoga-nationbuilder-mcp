@@ -1,15 +1,14 @@
 /**
  * NationBuilder organization relationship tools
  *
- * Lists people related to organizations via the NB V2 API.
- * Tries sideloading memberships first, falls back to the
- * dedicated relationships endpoint if available.
+ * Finds people related to organizations by querying signups
+ * whose parent_id matches the organization's signup ID.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
-import type { SignupAttributes, JsonApiResource } from "../types/index.js";
+import type { SignupAttributes } from "../types/index.js";
 import { formatSignup, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
@@ -27,95 +26,34 @@ export function registerRelationshipTools(
     },
     async (params) => {
       try {
-        // Try fetching the org's relationships via the dedicated endpoint
-        const response = await client.get<SignupAttributes>(
-          `signups/${params.org_id}/relationships`,
-          { page_size: 100 }
-        );
+        // Find signups whose parent is this organization
+        const response = await client.get<SignupAttributes>("signups", {
+          filter: { parent_id: params.org_id },
+          page_size: 100,
+        });
 
         if (response.data.length === 0) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `No relationships found for organization ${params.org_id}.`,
+                text: `No people found related to organization ${params.org_id}.`,
               },
             ],
           };
         }
 
-        let result = `Found ${response.data.length} relationship(s) for org ${params.org_id}:\n\n`;
-        for (const rel of response.data) {
-          // Relationships may be their own resource type — extract what we can
-          const attrs = rel.attributes;
-          const name =
-            attrs.full_name ||
-            [attrs.first_name, attrs.last_name].filter(Boolean).join(" ") ||
-            `ID ${rel.id}`;
-          const email = attrs.email ? ` — ${attrs.email}` : "";
-          const employer = attrs.employer ? ` (${attrs.employer})` : "";
-          result += `- **${name}**${email}${employer} [ID: ${rel.id}]\n`;
+        let result = `Found ${response.data.length} people related to org ${params.org_id}:\n\n`;
+        for (const person of response.data) {
+          result += formatSignup(person) + "\n\n";
         }
 
         return {
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
-        // If the relationships endpoint doesn't exist, try sideloading
         const errMsg =
           error instanceof Error ? error.message : String(error);
-
-        if (errMsg.includes("404") || errMsg.includes("400")) {
-          // Fallback: try include=memberships on the signup
-          try {
-            const doc = await client.getById<SignupAttributes>(
-              "signups",
-              params.org_id,
-              { include: "memberships" }
-            );
-
-            const included = (
-              doc as unknown as {
-                included?: JsonApiResource<SignupAttributes>[];
-              }
-            ).included;
-
-            if (included && included.length > 0) {
-              let result = `Found ${included.length} member(s) for org ${params.org_id}:\n\n`;
-              for (const member of included) {
-                result += formatSignup(member) + "\n\n";
-              }
-              return {
-                content: [
-                  { type: "text" as const, text: sanitizeText(result) },
-                ],
-              };
-            }
-
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `No members/relationships found for organization ${params.org_id} via sideloading.\nOriginal error: ${errMsg}`,
-                },
-              ],
-            };
-          } catch (fallbackError) {
-            // Both approaches failed
-            const fallbackMsg =
-              fallbackError instanceof Error
-                ? fallbackError.message
-                : String(fallbackError);
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Could not find relationships for org ${params.org_id}.\nEndpoint error: ${errMsg}\nSideload error: ${fallbackMsg}`,
-                },
-              ],
-            };
-          }
-        }
 
         reportError({
           category: "tool_error",
@@ -162,72 +100,33 @@ export function registerRelationshipTools(
 
       const allMembers: Map<
         string,
-        { name: string; email: string; employer: string; orgId: string }
+        { name: string; email: string; employer: string; orgName: string }
       > = new Map();
+      const orgNames: Map<string, string> = new Map();
       const errors: string[] = [];
 
       for (const orgId of ids) {
         try {
-          // Try relationships endpoint first
-          let found = false;
-          try {
-            const response = await client.get<SignupAttributes>(
-              `signups/${orgId}/relationships`,
-              { page_size: 100 }
-            );
-            for (const rel of response.data) {
-              const attrs = rel.attributes;
-              const name =
-                attrs.full_name ||
-                [attrs.first_name, attrs.last_name]
-                  .filter(Boolean)
-                  .join(" ") ||
-                `ID ${rel.id}`;
-              allMembers.set(rel.id, {
-                name,
-                email: attrs.email || "",
-                employer: attrs.employer || "",
-                orgId,
-              });
-            }
-            found = response.data.length > 0;
-          } catch {
-            // Endpoint not available — try sideloading
-          }
+          const response = await client.get<SignupAttributes>("signups", {
+            filter: { parent_id: orgId },
+            page_size: 100,
+          });
 
-          if (!found) {
-            try {
-              const doc = await client.getById<SignupAttributes>(
-                "signups",
-                orgId,
-                { include: "memberships" }
-              );
-              const included = (
-                doc as unknown as {
-                  included?: JsonApiResource<SignupAttributes>[];
-                }
-              ).included;
-              if (included) {
-                for (const member of included) {
-                  const attrs = member.attributes;
-                  const name =
-                    attrs.full_name ||
-                    [attrs.first_name, attrs.last_name]
-                      .filter(Boolean)
-                      .join(" ") ||
-                    `ID ${member.id}`;
-                  allMembers.set(member.id, {
-                    name,
-                    email: attrs.email || "",
-                    employer: attrs.employer || "",
-                    orgId,
-                  });
-                }
-              }
-            } catch {
-              // Both failed for this org
-              errors.push(orgId);
-            }
+          for (const person of response.data) {
+            const attrs = person.attributes;
+            const name =
+              attrs.full_name ||
+              [attrs.first_name, attrs.last_name]
+                .filter(Boolean)
+                .join(" ") ||
+              `ID ${person.id}`;
+            const orgName = orgNames.get(orgId) || orgId;
+            allMembers.set(person.id, {
+              name,
+              email: attrs.email || "",
+              employer: attrs.employer || "",
+              orgName,
+            });
           }
         } catch {
           errors.push(orgId);

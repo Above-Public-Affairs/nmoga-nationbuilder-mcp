@@ -18,6 +18,7 @@
 - Auto-refresh on 401: if the token expires mid-session, the server automatically refreshes it and retries the request
 - Refresh token persisted to Railway alongside access token so token refresh works after restarts
 - Token hydration on startup from env vars so the server doesn't lose OAuth state across deploys
+- Organization relationship tools (list_org_members, list_org_members_batch) — find people linked to organizations via parent_id
 - Organization relationship tools: `list_org_members` and `list_org_members_batch` for finding people linked to organizations
 - Switched to Streamable HTTP transport (`/mcp` endpoint) for compatibility with mcp-remote 0.1.38+
 - Legacy SSE endpoint (`/sse`) retained as fallback for older clients
