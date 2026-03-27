@@ -1,5 +1,12 @@
 # Changelog
 
+## [2026-03-26]
+
+### Added
+- Custom field filtering in search_people — filter by any NationBuilder custom field value (e.g. member_type = "service company")
+- Organization filter in search_people — filter to organizations only or people only
+- Custom field values now shown in search results
+
 ## [2026-03-27]
 
 ### Fixed

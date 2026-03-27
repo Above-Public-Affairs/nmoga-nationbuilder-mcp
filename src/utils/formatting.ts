@@ -39,6 +39,14 @@ export function formatSignup(resource: JsonApiResource<SignupAttributes>): strin
   }
 
   if (a.note) lines.push(`  Note: ${a.note}`);
+
+  if (a.custom_values && typeof a.custom_values === "object") {
+    const entries = Object.entries(a.custom_values).filter(([, v]) => v != null);
+    if (entries.length > 0) {
+      lines.push(`  Custom: ${entries.map(([k, v]) => `${k}=${String(v)}`).join(", ")}`);
+    }
+  }
+
   if (a.created_at) lines.push(`  Created: ${formatDate(a.created_at)}`);
 
   return lines.join("\n");

@@ -40,6 +40,18 @@ export function registerSignupTools(
         .string()
         .optional()
         .describe("Filter by last update date (YYYY-MM-DD)"),
+      custom_field: z
+        .string()
+        .optional()
+        .describe("Custom field slug to filter by (e.g. 'member_type')"),
+      custom_field_value: z
+        .string()
+        .optional()
+        .describe("Value to match for the custom field (e.g. 'service company')"),
+      is_organization: z
+        .boolean()
+        .optional()
+        .describe("Filter to organizations only (true) or people only (false)"),
       page_size: z
         .number()
         .int()
@@ -61,7 +73,7 @@ export function registerSignupTools(
           page_number: params.page_number,
           fields: {
             signups:
-              "first_name,last_name,full_name,email,phone,mobile,support_level,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,created_at,updated_at",
+              "first_name,last_name,full_name,email,phone,mobile,support_level,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,custom_values,created_at,updated_at",
           },
         };
 
@@ -87,6 +99,14 @@ export function registerSignupTools(
 
         if (params.updated_since) {
           filter.updated_at = { gte: params.updated_since };
+        }
+
+        if (params.custom_field && params.custom_field_value) {
+          filter.custom_values = { [params.custom_field]: params.custom_field_value };
+        }
+
+        if (params.is_organization != null) {
+          filter.is_organization = String(params.is_organization);
         }
 
         if (Object.keys(filter).length > 0) {
