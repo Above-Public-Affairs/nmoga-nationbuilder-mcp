@@ -39,12 +39,11 @@ export function registerContactTools(
     },
     async (params) => {
       try {
-        const attributes: Partial<ContactAttributes> = {
-          type_id: params.type_id,
-        };
-        if (params.method) attributes.method = params.method;
-        if (params.note) attributes.note = params.note;
-        if (params.status) attributes.status = params.status;
+        const attributes: Record<string, unknown> = {};
+        if (params.type_id) attributes.contact_type_id = params.type_id;
+        if (params.method) attributes.contact_method_id = params.method;
+        if (params.note) attributes.content = params.note;
+        if (params.status) attributes.contact_status_id = params.status;
 
         const response = await client.create<ContactAttributes>("contacts", {
           data: {
@@ -96,7 +95,6 @@ export function registerContactTools(
           page_size: params.page_size,
           page_number: params.page_number,
           filter: { signup_id: params.person_id },
-          sort: "-created_at",
         };
 
         const response = await client.get<ContactAttributes>("contacts", queryParams);

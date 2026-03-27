@@ -39,7 +39,6 @@ export function registerPetitionTools(
         const queryParams: QueryParams = {
           page_size: params.page_size,
           page_number: params.page_number,
-          sort: "-created_at",
         };
 
         const response = await client.get<PetitionAttributes>("petitions", queryParams);
@@ -128,7 +127,6 @@ export function registerPetitionTools(
         const queryParams: QueryParams = {
           page_size: params.page_size,
           page_number: params.page_number,
-          sort: "-created_at",
           include: "signup",
         };
 

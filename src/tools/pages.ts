@@ -47,7 +47,6 @@ export function registerPageTools(
         const queryParams: QueryParams = {
           page_size: params.page_size,
           page_number: params.page_number,
-          sort: "-created_at",
         };
 
         const filter: Record<string, string | Record<string, string>> = {};

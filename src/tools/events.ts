@@ -47,21 +47,7 @@ export function registerEventTools(
         const queryParams: QueryParams = {
           page_size: params.page_size,
           page_number: params.page_number,
-          sort: "-starts_at",
         };
-
-        const filter: Record<string, string | Record<string, string>> = {};
-
-        if (params.starts_after) {
-          filter.starts_at = { ...(filter.starts_at as Record<string, string> || {}), gte: params.starts_after };
-        }
-        if (params.starts_before) {
-          filter.starts_at = { ...(filter.starts_at as Record<string, string> || {}), lte: params.starts_before };
-        }
-
-        if (Object.keys(filter).length > 0) {
-          queryParams.filter = filter;
-        }
 
         const response = await client.get<EventAttributes>("events", queryParams);
 

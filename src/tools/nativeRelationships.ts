@@ -42,7 +42,7 @@ export function registerNativeRelationshipTools(
           page_number: params.page_number,
           include: "first_signup,second_signup",
           filter: {
-            signup_id: params.signup_id,
+            first_signup_id: params.signup_id,
           },
         };
 
