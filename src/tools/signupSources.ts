@@ -38,11 +38,12 @@ export function registerSignupSourceTools(
         const queryParams: QueryParams = {
           page_size: params.page_size,
           page_number: params.page_number,
+          filter: { signup_id: params.signup_id },
           sort: "-created_at",
         };
 
         const response = await client.get<SignupSourceAttributes>(
-          `signups/${params.signup_id}/signup_sources`,
+          "signup_sources",
           queryParams
         );
 

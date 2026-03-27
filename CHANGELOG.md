@@ -26,6 +26,14 @@
 - Switched to Streamable HTTP transport (`/mcp` endpoint) for compatibility with mcp-remote 0.1.38+
 - Legacy SSE endpoint (`/sse`) retained as fallback for older clients
 - Removed global express.json() middleware that was causing "Parse error: Invalid JSON" on connection
+- Signup source tools (list_signup_sources) — see where a person came from
+- Identity mapping tools (list_identity_mappings) — view cross-system ID links
+- Contact update tool (update_contact) — modify existing interaction records
+- List creation tool (create_list) — create new saved lists/segments
+
+### Fixed (endpoint paths)
+- Signup sources and identity mappings now use top-level endpoints with filter params instead of nested routes that returned 404
+- Contacts list now uses top-level `/contacts` with `filter[signup_id]` instead of nested route
 
 ## [2026-03-26]
 
