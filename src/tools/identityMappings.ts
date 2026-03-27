@@ -38,10 +38,12 @@ export function registerIdentityMappingTools(
         const queryParams: QueryParams = {
           page_size: params.page_size,
           page_number: params.page_number,
-          filter: { signup_id: params.signup_id },
         };
 
-        const response = await client.get<IdentityMappingAttributes>("identity_mappings", queryParams);
+        const response = await client.get<IdentityMappingAttributes>(
+          `signups/${params.signup_id}/identity_mappings`,
+          queryParams
+        );
 
         if (response.data.length === 0) {
           return {

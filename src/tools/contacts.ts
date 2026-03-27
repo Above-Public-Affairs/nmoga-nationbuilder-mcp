@@ -95,13 +95,11 @@ export function registerContactTools(
         const queryParams: QueryParams = {
           page_size: params.page_size,
           page_number: params.page_number,
+          filter: { signup_id: params.person_id },
           sort: "-created_at",
         };
 
-        const response = await client.get<ContactAttributes>(
-          `signups/${params.person_id}/contacts`,
-          queryParams
-        );
+        const response = await client.get<ContactAttributes>("contacts", queryParams);
 
         if (response.data.length === 0) {
           return {
