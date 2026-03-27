@@ -52,7 +52,7 @@ export function registerTagTools(
           };
         }
 
-        const response = await client.get<TagAttributes>("tags", queryParams);
+        const response = await client.get<TagAttributes>("signup_tags", queryParams);
 
         if (response.data.length === 0) {
           return {
@@ -95,13 +95,13 @@ export function registerTagTools(
 
         for (const tagName of params.tags) {
           try {
-            await client.create<TaggingAttributes>("taggings", {
+            await client.create<TaggingAttributes>("signup_taggings", {
               data: {
-                type: "taggings",
+                type: "signup_taggings",
                 attributes: {},
                 relationships: {
                   signup: { data: { id: params.person_id, type: "signups" } },
-                  tag: { data: { id: tagName, type: "tags" } },
+                  tag: { data: { id: tagName, type: "signup_tags" } },
                 },
               },
             });
@@ -138,7 +138,7 @@ export function registerTagTools(
       try {
         // First, get the person's taggings to find the tagging IDs
         const taggingsResponse = await client.get<TaggingAttributes>(
-          `signups/${params.person_id}/taggings`,
+          `signups/${params.person_id}/signup_taggings`,
           { include: "tag", page_size: 100 }
         );
 
@@ -151,7 +151,7 @@ export function registerTagTools(
               const tagId = t.relationships.tag.data.id;
               // Check included resources for the tag name
               const tagResource = taggingsResponse.included?.find(
-                (inc) => inc.type === "tags" && inc.id === tagId
+                (inc) => inc.type === "signup_tags" && inc.id === tagId
               );
               return tagResource && (tagResource.attributes as TagAttributes).name === tagName;
             }
@@ -160,7 +160,7 @@ export function registerTagTools(
 
           if (tagging) {
             try {
-              await client.delete("taggings", tagging.id);
+              await client.delete("signup_taggings", tagging.id);
               results.push(`- Removed: ${tagName}`);
             } catch (err) {
               results.push(`x Failed to remove "${tagName}": ${err instanceof Error ? err.message : String(err)}`);
