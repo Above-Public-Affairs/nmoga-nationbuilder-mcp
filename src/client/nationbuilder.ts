@@ -136,17 +136,35 @@ export function createNationBuilderClient(
           return undefined as R;
         }
 
-        const data = await response.json();
+        // Check content type before parsing
+        const contentType = response.headers.get("content-type") || "";
+        const responseText = await response.text();
+
+        if (!contentType.includes("json")) {
+          const preview = responseText.substring(0, 200).replace(/\s+/g, " ").trim();
+          throw new Error(
+            `NationBuilder API error: HTTP ${response.status} returned non-JSON (${contentType}). URL: ${url}. Preview: ${preview}`
+          );
+        }
+
+        let data: unknown;
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          throw new Error(
+            `NationBuilder API error: HTTP ${response.status} invalid JSON. Preview: ${responseText.substring(0, 200)}`
+          );
+        }
 
         // Check for JSON:API error responses
         if (!response.ok) {
-          if (data && "errors" in data) {
+          if (data && typeof data === "object" && "errors" in data) {
             throw new Error(
               `NationBuilder API error (${response.status}): ${formatApiErrors(data as JsonApiErrorResponse)}`
             );
           }
           throw new Error(
-            `NationBuilder API error: HTTP ${response.status}`
+            `NationBuilder API error: HTTP ${response.status}. Body: ${responseText.substring(0, 200)}`
           );
         }
 
