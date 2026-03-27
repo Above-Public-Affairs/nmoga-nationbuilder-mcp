@@ -13,8 +13,12 @@
 ### Fixed
 - When NationBuilder returns a 401 auth error, tools now show a direct link to re-authorize instead of a cryptic error message
 - Fixed auth header: switched from `access_token` header to `Authorization: Bearer` for NB V2 OAuth compatibility
+- Fixed XSS vulnerability in OAuth callback error display — error messages are now HTML-escaped
 
 ### Added
+- CSRF protection via OAuth `state` parameter — prevents cross-site request forgery on the authorization flow
+- PKCE (S256) support on OAuth flow — prevents authorization code interception attacks
+- Authorization code input validation before token exchange
 - Auto-refresh on 401: if the token expires mid-session, the server automatically refreshes it and retries the request
 - Refresh token persisted to Railway alongside access token so token refresh works after restarts
 - Token hydration on startup from env vars so the server doesn't lose OAuth state across deploys

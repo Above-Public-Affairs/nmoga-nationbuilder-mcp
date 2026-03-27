@@ -4,9 +4,12 @@
  * Adds /oauth/authorize and /oauth/callback routes.
  * Persists tokens to Railway env var (NATIONBUILDER_ACCESS_TOKEN) so they survive restarts.
  * Falls back to NATIONBUILDER_ACCESS_TOKEN env var on startup.
+ *
+ * Security: CSRF state parameter, PKCE (S256), HTML output escaping.
  */
 
 import { Router } from "express";
+import { randomBytes, createHash } from "crypto";
 
 interface TokenData {
   accessToken: string;
@@ -15,6 +18,42 @@ interface TokenData {
 }
 
 let tokenData: TokenData | null = null;
+
+// --- PKCE helpers ---
+function generateCodeVerifier(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function generateCodeChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url");
+}
+
+// --- CSRF state + PKCE storage (keyed by state value, expires after 10 min) ---
+interface PendingAuth {
+  codeVerifier: string;
+  createdAt: number;
+}
+const pendingAuths = new Map<string, PendingAuth>();
+
+function cleanupPendingAuths(): void {
+  const tenMinutes = 10 * 60 * 1000;
+  const now = Date.now();
+  for (const [state, pending] of pendingAuths) {
+    if (now - pending.createdAt > tenMinutes) {
+      pendingAuths.delete(state);
+    }
+  }
+}
+
+// --- HTML escaping to prevent XSS ---
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 /** Persist the access + refresh tokens to Railway env vars so they survive restarts */
 async function persistTokenToRailway(accessToken: string, refreshToken?: string | null): Promise<void> {
@@ -190,12 +229,26 @@ export function createOAuthRouter(): Router {
       return;
     }
 
+    // Generate CSRF state token
+    const state = randomBytes(24).toString("base64url");
+
+    // Generate PKCE code verifier + challenge (S256)
+    const codeVerifier = generateCodeVerifier();
+    const codeChallenge = generateCodeChallenge(codeVerifier);
+
+    // Store state → verifier mapping (expires after 10 min)
+    cleanupPendingAuths();
+    pendingAuths.set(state, { codeVerifier, createdAt: Date.now() });
+
     const authorizeUrl = new URL(
       `https://${slug}.nationbuilder.com/oauth/authorize`
     );
     authorizeUrl.searchParams.set("response_type", "code");
     authorizeUrl.searchParams.set("client_id", clientId);
     authorizeUrl.searchParams.set("redirect_uri", callbackUrl);
+    authorizeUrl.searchParams.set("state", state);
+    authorizeUrl.searchParams.set("code_challenge", codeChallenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
     res.redirect(authorizeUrl.toString());
   });
@@ -204,22 +257,49 @@ export function createOAuthRouter(): Router {
   router.get("/oauth/callback", async (req, res) => {
     const code = req.query.code as string | undefined;
     const error = req.query.error as string | undefined;
+    const state = req.query.state as string | undefined;
 
     if (error) {
       res.status(400).send(`
         <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
           <h2>Authorization Denied</h2>
-          <p>NationBuilder returned error: <code>${error}</code></p>
+          <p>NationBuilder returned error: <code>${escapeHtml(error)}</code></p>
         </body></html>
       `);
       return;
     }
+
+    // Verify CSRF state parameter
+    if (!state || !pendingAuths.has(state)) {
+      res.status(400).send(`
+        <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
+          <h2>Invalid State</h2>
+          <p>OAuth state parameter is missing or invalid. This may indicate a CSRF attack or an expired authorization. Please try again.</p>
+        </body></html>
+      `);
+      return;
+    }
+
+    // Retrieve and consume the pending auth (one-time use)
+    const pendingAuth = pendingAuths.get(state)!;
+    pendingAuths.delete(state);
 
     if (!code) {
       res.status(400).send(`
         <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
           <h2>Missing Code</h2>
           <p>No authorization code received from NationBuilder.</p>
+        </body></html>
+      `);
+      return;
+    }
+
+    // Sanitize code: NB codes should be alphanumeric with possible dashes/underscores
+    if (!/^[\w\-\.]+$/.test(code) || code.length > 512) {
+      res.status(400).send(`
+        <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
+          <h2>Invalid Code</h2>
+          <p>The authorization code has an unexpected format.</p>
         </body></html>
       `);
       return;
@@ -244,6 +324,7 @@ export function createOAuthRouter(): Router {
             client_id: clientId,
             client_secret: clientSecret,
             redirect_uri: callbackUrl,
+            code_verifier: pendingAuth.codeVerifier,
           }),
         }
       );
