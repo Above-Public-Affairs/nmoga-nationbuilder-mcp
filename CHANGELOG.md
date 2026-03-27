@@ -10,6 +10,12 @@
 
 ## [2026-03-27]
 
+### Added
+- Global MCP instructions — any Claude instance connecting to this server now receives guidance on NationBuilder's data model, relationship types, custom fields, and tool selection
+
+### Changed
+- Corrected tool descriptions for list_org_members and list_org_members_batch to clarify they match on the employer text field, not formal NationBuilder relationships
+
 ### Removed
 - `log_contact` — V2 API field names unknown, removed until NB confirms correct attributes
 - `update_contact` — same reason as log_contact

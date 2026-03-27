@@ -57,7 +57,7 @@ export function registerRelationshipTools(
 ): void {
   server.tool(
     "list_org_members",
-    "List people related to an organization in NationBuilder. Returns people linked via NB's relationship system (Employee of, Board member of, etc.).",
+    "List people whose employer field matches an organization's name. NOTE: This matches on the employer text field, NOT formal NationBuilder relationships. For actual relationship records (employee_of, primary_contact_of), use list_native_relationships instead.",
     {
       org_id: z
         .string()
@@ -157,7 +157,7 @@ export function registerRelationshipTools(
 
   server.tool(
     "list_org_members_batch",
-    "Find all people related to multiple organizations. Takes a comma-separated list of org IDs and returns all related people across those organizations.",
+    "Find all people whose employer field matches multiple organizations' names. NOTE: This matches on the employer text field, NOT formal NationBuilder relationships. For actual relationship records, use list_native_relationships instead.",
     {
       org_ids: z
         .string()

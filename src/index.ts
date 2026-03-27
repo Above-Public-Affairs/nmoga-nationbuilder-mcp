@@ -42,6 +42,47 @@ import { registerIdentityMappingTools } from "./tools/identityMappings.js";
 // CRITICAL: Never use console.log() - it corrupts JSON-RPC on stdout
 // Always use console.error() for any logging/debugging
 
+const INSTRUCTIONS = `
+# NationBuilder MCP Server — Instructions
+
+## Key Concepts
+
+### People vs Organizations
+NationBuilder stores both people and organizations as "signups" in the same endpoint. Organizations have is_organization: true. When searching, use the search_people tool for both — there is no separate organizations endpoint.
+
+### Relationships (IMPORTANT)
+There are two completely different systems that can associate people with organizations:
+
+1. **Formal Relationships** (use these): The NationBuilder relationships API stores typed connections between two signups. The two main types are "employee_of" and "primary_contact_of". Use the \`list_native_relationships\` tool to query these. This is the authoritative source for who is formally connected to an organization.
+
+2. **Employer Field** (informational only): Each person signup has an "employer" text field. The \`list_org_members\` and \`list_org_members_batch\` tools match on this employer text field — they do NOT query formal NationBuilder relationships. Treat these results as informational/supplementary, not as confirmed relationships.
+
+When asked about relationships between people and organizations, always use \`list_native_relationships\`. Do not rely on \`list_org_members\` for formal relationship data.
+
+### Custom Fields
+NationBuilder supports custom fields on signups. Key custom fields in this nation include:
+- \`member_type\` — categorizes organizations (e.g., "Service Company", "Operator")
+
+To search by custom fields, use \`search_people\` with the \`custom_field\` and \`custom_field_value\` parameters, or use \`advanced_search\` for more complex queries.
+
+### Tags
+Tags are the primary way to categorize and segment people. Use \`list_people_with_tag\` to find everyone with a specific tag, and \`list_tags\` to see all available tags.
+
+### Memberships
+Memberships track organizational membership tiers and statuses. Use \`list_membership_types\` to see available tiers, and \`list_memberships\` to query membership records.
+
+## Tool Selection Guide
+
+| Task | Tool to Use |
+|------|-------------|
+| Find formal relationships for a person or org | \`list_native_relationships\` |
+| Find people by employer field (informational) | \`list_org_members\` |
+| Search people or orgs by name/email | \`search_people\` |
+| Search by custom fields | \`search_people\` with custom_field params, or \`advanced_search\` |
+| Find people with a specific tag | \`list_people_with_tag\` |
+| Create a formal relationship | \`create_native_relationship\` |
+`.trim();
+
 function validateEnv(): { slug: string; staticToken: string | null } {
   const slug = process.env.NATIONBUILDER_SLUG;
   const staticToken = process.env.NATIONBUILDER_ACCESS_TOKEN || null;
@@ -65,10 +106,15 @@ function createServer(
   slug: string,
   tokenGetter: string | (() => string)
 ): McpServer {
-  const server = new McpServer({
-    name: "nmoga-nationbuilder-mcp",
-    version: "1.0.0",
-  });
+  const server = new McpServer(
+    {
+      name: "nmoga-nationbuilder-mcp",
+      version: "1.0.0",
+    },
+    {
+      instructions: INSTRUCTIONS,
+    }
+  );
 
   const client = createNationBuilderClient(slug, tokenGetter);
 
