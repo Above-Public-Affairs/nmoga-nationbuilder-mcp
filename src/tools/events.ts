@@ -1,15 +1,14 @@
 /**
  * Event tools for NationBuilder
- * - list_events: List events with date filtering
+ * - list_events: List events
  * - get_event: Get event details
- * - list_event_rsvps: List RSVPs for an event
  */
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
-import type { EventAttributes, EventRsvpAttributes, QueryParams } from "../types/index.js";
-import { formatEvent, formatRsvp, formatPagination, sanitizeText } from "../utils/formatting.js";
+import type { EventAttributes, QueryParams } from "../types/index.js";
+import { formatEvent, formatPagination, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
 export function registerEventTools(
@@ -104,60 +103,4 @@ export function registerEventTools(
     }
   );
 
-  server.tool(
-    "list_event_rsvps",
-    "List RSVPs for a specific event in NationBuilder.",
-    {
-      event_id: z.string().describe("The NationBuilder event ID"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(50)
-        .describe("Results per page"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
-    },
-    async (params) => {
-      try {
-        const queryParams: QueryParams = {
-          page_size: params.page_size,
-          page_number: params.page_number,
-          include: "signup",
-        };
-
-        const response = await client.get<EventRsvpAttributes>(
-          `events/${params.event_id}/rsvps`,
-          queryParams
-        );
-
-        if (response.data.length === 0) {
-          return {
-            content: [{ type: "text" as const, text: `No RSVPs found for event ${params.event_id}.` }],
-          };
-        }
-
-        let result = `RSVPs for event ${params.event_id}:\n\n`;
-        for (const rsvp of response.data) {
-          result += formatRsvp(rsvp, response.included) + "\n\n";
-        }
-        result += formatPagination(response, params.page_number, params.page_size);
-
-        return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
-        };
-      } catch (error) {
-        reportError({ category: "tool_error", message: "list_event_rsvps failed", rawError: error, context: { event_id: params.event_id } });
-        return {
-          isError: true,
-          content: [{ type: "text" as const, text: `Error listing RSVPs: ${error instanceof Error ? error.message : String(error)}` }],
-        };
-      }
-    }
-  );
 }

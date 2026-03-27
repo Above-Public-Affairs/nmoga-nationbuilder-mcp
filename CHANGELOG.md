@@ -10,6 +10,13 @@
 
 ## [2026-03-27]
 
+### Removed
+- `log_contact` — V2 API field names unknown, removed until NB confirms correct attributes
+- `update_contact` — same reason as log_contact
+- `list_event_rsvps` — nested route 404s, endpoint may not exist in V2
+- `list_petition_signatures` — filter attribute name rejected by V2 API
+- `get_donation` — no donations in NB instance to test against; removed until needed
+
 ### Fixed
 - When NationBuilder returns a 401 auth error, tools now show a direct link to re-authorize instead of a cryptic error message
 - Fixed auth header: switched from `access_token` header to `Authorization: Bearer` for NB V2 OAuth compatibility

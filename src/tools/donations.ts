@@ -1,7 +1,6 @@
 /**
  * Donation tools for NationBuilder
  * - list_donations: List/filter donations
- * - get_donation: Get donation details
  */
 
 import { z } from "zod";
@@ -107,47 +106,4 @@ export function registerDonationTools(
     }
   );
 
-  server.tool(
-    "get_donation",
-    "Get full details for a specific donation by its NationBuilder ID.",
-    {
-      donation_id: z.string().describe("The NationBuilder donation ID"),
-    },
-    async (params) => {
-      try {
-        const response = await client.getById<DonationAttributes>(
-          "donations",
-          params.donation_id,
-          { include: "signup" }
-        );
-
-        let result = formatDonation(response.data);
-
-        // Include donor info if available
-        if (response.data.relationships?.signup?.data && response.included) {
-          const rel = response.data.relationships.signup.data;
-          if (!Array.isArray(rel)) {
-            const signup = response.included.find(
-              (r) => r.type === "signups" && r.id === rel.id
-            );
-            if (signup) {
-              const attrs = signup.attributes as Record<string, unknown>;
-              const name = attrs.full_name || [attrs.first_name, attrs.last_name].filter(Boolean).join(" ");
-              if (name) result += `\n  Donor: ${name} (ID: ${rel.id})`;
-            }
-          }
-        }
-
-        return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
-        };
-      } catch (error) {
-        reportError({ category: "tool_error", message: "get_donation failed", rawError: error, context: { donation_id: params.donation_id } });
-        return {
-          isError: true,
-          content: [{ type: "text" as const, text: `Error getting donation: ${error instanceof Error ? error.message : String(error)}` }],
-        };
-      }
-    }
-  );
 }
