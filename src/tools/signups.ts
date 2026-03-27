@@ -268,8 +268,8 @@ export function registerSignupTools(
       first_name: z.string().describe("First name"),
       last_name: z.string().describe("Last name"),
       email: z.string().optional().describe("Email address"),
-      phone: z.string().optional().describe("Phone number"),
-      mobile: z.string().optional().describe("Mobile phone number"),
+      phone_number: z.string().optional().describe("Phone number"),
+      mobile_number: z.string().optional().describe("Mobile phone number"),
       support_level: z
         .number()
         .int()
@@ -323,8 +323,8 @@ export function registerSignupTools(
       first_name: z.string().optional().describe("First name"),
       last_name: z.string().optional().describe("Last name"),
       email: z.string().optional().describe("Email address"),
-      phone: z.string().optional().describe("Phone number"),
-      mobile: z.string().optional().describe("Mobile phone number"),
+      phone_number: z.string().optional().describe("Phone number"),
+      mobile_number: z.string().optional().describe("Mobile phone number"),
       support_level: z
         .number()
         .int()

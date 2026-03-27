@@ -135,6 +135,7 @@ export function registerListTools(
     {
       name: z.string().describe("Name for the new list"),
       slug: z.string().optional().describe("URL-friendly slug (auto-generated from name if omitted)"),
+      author_id: z.string().describe("The signup ID of the list author/owner"),
     },
     async (params) => {
       try {
@@ -147,6 +148,9 @@ export function registerListTools(
           data: {
             type: "lists",
             attributes,
+            relationships: {
+              author: { data: { id: params.author_id, type: "signups" } },
+            },
           },
         });
 

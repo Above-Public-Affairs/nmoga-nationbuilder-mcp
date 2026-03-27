@@ -95,13 +95,33 @@ export function registerTagTools(
 
         for (const tagName of params.tags) {
           try {
+            // Look up tag by name to get its numeric ID
+            const tagSearch = await client.get<TagAttributes>("signup_tags", {
+              filter: { name: tagName },
+              page_size: 1,
+            });
+
+            let tagId: string;
+            if (tagSearch.data.length > 0) {
+              tagId = tagSearch.data[0].id;
+            } else {
+              // Create the tag first
+              const newTag = await client.create<TagAttributes>("signup_tags", {
+                data: {
+                  type: "signup_tags",
+                  attributes: { name: tagName },
+                },
+              });
+              tagId = newTag.data.id;
+            }
+
             await client.create<TaggingAttributes>("signup_taggings", {
               data: {
                 type: "signup_taggings",
                 attributes: {},
                 relationships: {
                   signup: { data: { id: params.person_id, type: "signups" } },
-                  tag: { data: { id: tagName, type: "signup_tags" } },
+                  tag: { data: { id: tagId, type: "signup_tags" } },
                 },
               },
             });
