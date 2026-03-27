@@ -89,26 +89,43 @@ async function startSseServer(slug: string, token: string): Promise<void> {
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
-    if (req.method === "POST" && !sessionId) {
-      // New session
+    if (sessionId && streamableTransports.has(sessionId)) {
+      // Existing session — route to its transport
+      await streamableTransports.get(sessionId)!.handleRequest(req, res);
+    } else if (req.method === "POST" && !sessionId) {
+      // New session — first POST has no session ID (the initialize request)
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
       });
-      const id = transport.sessionId ?? randomUUID();
-      streamableTransports.set(id, transport);
 
       const server = createServer(slug, token);
       await server.connect(transport);
 
-      res.setHeader("mcp-session-id", id);
+      // handleRequest processes the initialize and sets the session ID
+      // in the response header automatically
       await transport.handleRequest(req, res);
 
-      res.on("close", () => {
-        console.error(`Streamable HTTP session closed: ${id}`);
-        streamableTransports.delete(id);
-      });
-    } else if (sessionId && streamableTransports.has(sessionId)) {
-      await streamableTransports.get(sessionId)!.handleRequest(req, res);
+      // After handleRequest, transport.sessionId is now set
+      if (transport.sessionId) {
+        console.error(`New Streamable HTTP session: ${transport.sessionId}`);
+        streamableTransports.set(transport.sessionId, transport);
+
+        transport.onclose = () => {
+          console.error(`Streamable HTTP session closed: ${transport.sessionId}`);
+          if (transport.sessionId) {
+            streamableTransports.delete(transport.sessionId);
+          }
+        };
+      }
+    } else if (req.method === "DELETE" && sessionId) {
+      // Session cleanup
+      const transport = streamableTransports.get(sessionId);
+      if (transport) {
+        await transport.handleRequest(req, res);
+        streamableTransports.delete(sessionId);
+      } else {
+        res.status(404).json({ error: "Session not found" });
+      }
     } else {
       res.status(400).json({ error: "Invalid or missing session ID" });
     }
