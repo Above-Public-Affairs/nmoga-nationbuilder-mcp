@@ -16,8 +16,8 @@ interface TokenData {
 
 let tokenData: TokenData | null = null;
 
-/** Persist the access token to Railway env var so it survives restarts */
-async function persistTokenToRailway(accessToken: string): Promise<void> {
+/** Persist the access + refresh tokens to Railway env vars so they survive restarts */
+async function persistTokenToRailway(accessToken: string, refreshToken?: string | null): Promise<void> {
   const railwayToken = process.env.RAILWAY_API_TOKEN;
   const projectId = process.env.RAILWAY_PROJECT_ID;
   const environmentId = process.env.RAILWAY_ENVIRONMENT_ID;
@@ -45,7 +45,10 @@ async function persistTokenToRailway(accessToken: string): Promise<void> {
             projectId,
             environmentId,
             serviceId,
-            variables: { NATIONBUILDER_ACCESS_TOKEN: accessToken },
+            variables: {
+              NATIONBUILDER_ACCESS_TOKEN: accessToken,
+              ...(refreshToken ? { NATIONBUILDER_REFRESH_TOKEN: refreshToken } : {}),
+            },
           },
         },
       }),
@@ -75,6 +78,23 @@ function getConfig() {
   return { slug, clientId, clientSecret, callbackUrl };
 }
 
+/** Hydrate in-memory tokenData from env vars on startup (so refresh works after restarts) */
+export function initTokenFromEnv(): void {
+  const accessToken = process.env.NATIONBUILDER_ACCESS_TOKEN;
+  const refreshToken = process.env.NATIONBUILDER_REFRESH_TOKEN;
+
+  if (accessToken && !tokenData) {
+    tokenData = {
+      accessToken,
+      refreshToken: refreshToken ?? null,
+      expiresAt: null, // unknown — will refresh on first 401
+    };
+    console.error(
+      `Loaded token from env vars (refresh token: ${refreshToken ? "yes" : "no"})`
+    );
+  }
+}
+
 /** Returns true if OAuth env vars are configured */
 export function isOAuthConfigured(): boolean {
   const { clientId, clientSecret, callbackUrl } = getConfig();
@@ -86,16 +106,12 @@ export function getOAuthToken(): string | null {
   return tokenData?.accessToken ?? null;
 }
 
-/** Refresh the token if we have a refresh token and it's near expiry */
-export async function refreshTokenIfNeeded(): Promise<void> {
-  if (!tokenData || !tokenData.refreshToken || !tokenData.expiresAt) return;
-
-  // Refresh if within 5 minutes of expiry
-  const fiveMinutes = 5 * 60 * 1000;
-  if (Date.now() < tokenData.expiresAt - fiveMinutes) return;
+/** Internal refresh logic shared by refreshTokenIfNeeded and forceRefreshToken */
+async function doRefresh(): Promise<boolean> {
+  if (!tokenData?.refreshToken) return false;
 
   const { slug, clientId, clientSecret } = getConfig();
-  if (!clientId || !clientSecret) return;
+  if (!clientId || !clientSecret) return false;
 
   console.error("Refreshing OAuth token...");
 
@@ -117,7 +133,7 @@ export async function refreshTokenIfNeeded(): Promise<void> {
     if (!response.ok) {
       const text = await response.text();
       console.error(`Token refresh failed: ${response.status} ${text}`);
-      return;
+      return false;
     }
 
     const data = (await response.json()) as {
@@ -135,10 +151,28 @@ export async function refreshTokenIfNeeded(): Promise<void> {
     };
 
     console.error("OAuth token refreshed successfully");
-    persistTokenToRailway(data.access_token).catch(() => {});
+    persistTokenToRailway(data.access_token, data.refresh_token ?? tokenData.refreshToken).catch(() => {});
+    return true;
   } catch (error) {
     console.error("Token refresh error:", error);
+    return false;
   }
+}
+
+/** Refresh the token if we have a refresh token and it's near expiry */
+export async function refreshTokenIfNeeded(): Promise<void> {
+  if (!tokenData || !tokenData.refreshToken || !tokenData.expiresAt) return;
+
+  // Refresh if within 5 minutes of expiry
+  const fiveMinutes = 5 * 60 * 1000;
+  if (Date.now() < tokenData.expiresAt - fiveMinutes) return;
+
+  await doRefresh();
+}
+
+/** Force a token refresh (e.g. after a 401). Returns true if successful. */
+export async function forceRefreshToken(): Promise<boolean> {
+  return doRefresh();
 }
 
 /** Create Express router with OAuth routes */
@@ -243,8 +277,8 @@ export function createOAuthRouter(): Router {
           : null,
       };
 
-      // Persist to Railway env var so token survives restarts
-      persistTokenToRailway(data.access_token).catch(() => {});
+      // Persist to Railway env vars so tokens survive restarts
+      persistTokenToRailway(data.access_token, data.refresh_token).catch(() => {});
 
       const expiryInfo = data.expires_in
         ? `Token expires in ${Math.round(data.expires_in / 3600)} hours (auto-refresh enabled).`

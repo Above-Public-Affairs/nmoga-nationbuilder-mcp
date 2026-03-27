@@ -13,6 +13,7 @@ import type {
 } from "../types/index.js";
 import { RateLimiter } from "../utils/rateLimiter.js";
 import { reportError } from "../utils/errorReporter.js";
+import { forceRefreshToken } from "../oauth.js";
 
 export interface NationBuilderClient {
   get<T>(resource: string, params?: QueryParams): Promise<JsonApiResponse<T>>;
@@ -119,8 +120,24 @@ export function createNationBuilderClient(
 
         const response = await fetch(url, fetchOptions);
 
-        // Handle auth errors — direct user to re-authorize
-        if (response.status === 401) {
+        // Handle auth errors — try auto-refresh, then direct user to re-authorize
+        if (response.status === 401 && attempt < retryLimit - 1) {
+          console.error("Got 401 — attempting token refresh...");
+          const refreshed = await forceRefreshToken();
+          if (refreshed) {
+            console.error("Token refreshed, retrying request...");
+            continue; // retry with new token (buildHeaders() will pick it up)
+          }
+          // Refresh failed — fall through to throw
+          const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
+          const authorizeUrl = domain
+            ? `https://${domain}/oauth/authorize`
+            : "/oauth/authorize";
+          throw new Error(
+            `NationBuilder authentication failed. Your access token is expired and refresh failed.\n` +
+            `Re-authorize here: ${authorizeUrl}`
+          );
+        } else if (response.status === 401) {
           const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
           const authorizeUrl = domain
             ? `https://${domain}/oauth/authorize`

@@ -18,7 +18,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "crypto";
 import express from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
-import { createOAuthRouter, getOAuthToken, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
+import { createOAuthRouter, getOAuthToken, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
 import { registerSignupTools } from "./tools/signups.js";
 import { registerTagTools } from "./tools/tags.js";
 import { registerContactTools } from "./tools/contacts.js";
@@ -239,6 +239,11 @@ async function main(): Promise<void> {
     console.error("Unhandled rejection:", reason);
     process.exit(1);
   });
+
+  // Hydrate OAuth token from env vars (if persisted from prior session)
+  if (isOAuthConfigured()) {
+    initTokenFromEnv();
+  }
 
   // If PORT is set, use SSE transport (Railway deployment)
   // Otherwise, use stdio transport (local Claude Desktop)

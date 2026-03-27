@@ -12,6 +12,11 @@
 
 ### Fixed
 - When NationBuilder returns a 401 auth error, tools now show a direct link to re-authorize instead of a cryptic error message
+
+### Added
+- Auto-refresh on 401: if the token expires mid-session, the server automatically refreshes it and retries the request
+- Refresh token persisted to Railway alongside access token so token refresh works after restarts
+- Token hydration on startup from env vars so the server doesn't lose OAuth state across deploys
 - Switched to Streamable HTTP transport (`/mcp` endpoint) for compatibility with mcp-remote 0.1.38+
 - Legacy SSE endpoint (`/sse`) retained as fallback for older clients
 - Removed global express.json() middleware that was causing "Parse error: Invalid JSON" on connection
