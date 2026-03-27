@@ -1,0 +1,39 @@
+{
+  "name": "nmoga-nationbuilder-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for NMOGA NationBuilder API - manage people, tags, contacts, donations, events, and lists",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "nmoga-nationbuilder-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "nationbuilder",
+    "nmoga",
+    "crm",
+    "claude",
+    "anthropic"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^4.21.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
