@@ -72,7 +72,6 @@ function createServer(
 async function startSseServer(slug: string, token: string): Promise<void> {
   const port = parseInt(process.env.PORT || "3000", 10);
   const app = express();
-  app.use(express.json());
 
   // Track active transports by session ID (Streamable HTTP)
   const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
