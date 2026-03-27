@@ -139,10 +139,11 @@ export function registerListTools(
     },
     async (params) => {
       try {
+        const autoSlug = params.name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
         const attributes: Partial<ListAttributes> = {
           name: params.name,
+          slug: params.slug || autoSlug,
         };
-        if (params.slug) attributes.slug = params.slug;
 
         const response = await client.create<ListAttributes>("lists", {
           data: {
