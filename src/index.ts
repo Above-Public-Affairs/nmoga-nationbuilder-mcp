@@ -14,6 +14,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { randomUUID } from "crypto";
 import express from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
 import { registerSignupTools } from "./tools/signups.js";
@@ -69,57 +71,72 @@ function createServer(
 
 async function startSseServer(slug: string, token: string): Promise<void> {
   const port = parseInt(process.env.PORT || "3000", 10);
-  const mcpAuthToken = process.env.MCP_AUTH_TOKEN;
   const app = express();
+  app.use(express.json());
 
-  // Track active SSE transports by session ID
-  const transports = new Map<string, SSEServerTransport>();
+  // Track active transports by session ID (Streamable HTTP)
+  const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
+  // Track active SSE transports (legacy)
+  const sseTransports = new Map<string, SSEServerTransport>();
 
-  // Auth middleware for MCP endpoints
-  function authMiddleware(
-    req: express.Request,
-    res: express.Response,
-    next: express.NextFunction
-  ): void {
-    if (mcpAuthToken) {
-      const auth = req.headers.authorization;
-      if (!auth || auth !== `Bearer ${mcpAuthToken}`) {
-        res.status(401).json({ error: "Unauthorized" });
-        return;
-      }
-    }
-    next();
-  }
-
-  // Health check (no auth required)
+  // Health check
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", name: "nmoga-nationbuilder-mcp" });
   });
 
-  // SSE endpoint — client connects here to receive server messages
-  app.get("/sse", authMiddleware, async (req, res) => {
-    console.error(`New SSE connection from ${req.ip}`);
+  // Streamable HTTP endpoint — modern mcp-remote uses this
+  app.all("/mcp", async (req, res) => {
+    console.error(`Streamable HTTP ${req.method} from ${req.ip}`);
+
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    if (req.method === "POST" && !sessionId) {
+      // New session
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+      });
+      const id = transport.sessionId ?? randomUUID();
+      streamableTransports.set(id, transport);
+
+      const server = createServer(slug, token);
+      await server.connect(transport);
+
+      res.setHeader("mcp-session-id", id);
+      await transport.handleRequest(req, res);
+
+      res.on("close", () => {
+        console.error(`Streamable HTTP session closed: ${id}`);
+        streamableTransports.delete(id);
+      });
+    } else if (sessionId && streamableTransports.has(sessionId)) {
+      await streamableTransports.get(sessionId)!.handleRequest(req, res);
+    } else {
+      res.status(400).json({ error: "Invalid or missing session ID" });
+    }
+  });
+
+  // Legacy SSE endpoint — fallback for older clients
+  app.get("/sse", async (req, res) => {
+    console.error(`Legacy SSE connection from ${req.ip}`);
 
     const transport = new SSEServerTransport("/messages", res);
     const sessionId = transport.sessionId;
-    transports.set(sessionId, transport);
+    sseTransports.set(sessionId, transport);
 
-    // Create a new server instance for this connection
     const server = createServer(slug, token);
 
-    // Clean up on disconnect
     res.on("close", () => {
       console.error(`SSE connection closed: ${sessionId}`);
-      transports.delete(sessionId);
+      sseTransports.delete(sessionId);
     });
 
     await server.connect(transport);
   });
 
-  // Messages endpoint — client POSTs JSON-RPC messages here
-  app.post("/messages", authMiddleware, async (req, res) => {
+  // Legacy messages endpoint
+  app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId as string;
-    const transport = transports.get(sessionId);
+    const transport = sseTransports.get(sessionId);
 
     if (!transport) {
       res.status(404).json({ error: "Session not found" });
@@ -130,12 +147,10 @@ async function startSseServer(slug: string, token: string): Promise<void> {
   });
 
   app.listen(port, () => {
-    console.error(`NMOGA NationBuilder MCP server (SSE) listening on port ${port}`);
-    console.error(`SSE endpoint: http://localhost:${port}/sse`);
+    console.error(`NMOGA NationBuilder MCP server listening on port ${port}`);
+    console.error(`Streamable HTTP: http://localhost:${port}/mcp`);
+    console.error(`Legacy SSE: http://localhost:${port}/sse`);
     console.error(`Health check: http://localhost:${port}/health`);
-    if (mcpAuthToken) {
-      console.error("Auth: Bearer token required");
-    }
   });
 }
 

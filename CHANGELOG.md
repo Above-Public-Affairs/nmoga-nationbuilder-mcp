@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026-03-27]
+
+### Fixed
+- Switched to Streamable HTTP transport (`/mcp` endpoint) for compatibility with mcp-remote 0.1.38+
+- Legacy SSE endpoint (`/sse`) retained as fallback for older clients
+
 ## [2026-03-26]
 
 ### Added
