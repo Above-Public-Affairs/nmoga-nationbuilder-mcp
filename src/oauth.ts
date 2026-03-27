@@ -2,7 +2,8 @@
  * OAuth 2.0 flow for NationBuilder
  *
  * Adds /oauth/authorize and /oauth/callback routes.
- * Stores tokens in memory. Falls back to NATIONBUILDER_ACCESS_TOKEN env var.
+ * Persists tokens to Railway env var (NATIONBUILDER_ACCESS_TOKEN) so they survive restarts.
+ * Falls back to NATIONBUILDER_ACCESS_TOKEN env var on startup.
  */
 
 import { Router } from "express";
@@ -14,6 +15,52 @@ interface TokenData {
 }
 
 let tokenData: TokenData | null = null;
+
+/** Persist the access token to Railway env var so it survives restarts */
+async function persistTokenToRailway(accessToken: string): Promise<void> {
+  const railwayToken = process.env.RAILWAY_API_TOKEN;
+  const projectId = process.env.RAILWAY_PROJECT_ID;
+  const environmentId = process.env.RAILWAY_ENVIRONMENT_ID;
+  const serviceId = process.env.RAILWAY_SERVICE_ID;
+
+  if (!railwayToken || !projectId || !environmentId || !serviceId) return;
+
+  try {
+    const mutation = `
+      mutation UpsertVariables($input: VariableCollectionUpsertInput!) {
+        variableCollectionUpsert(input: $input)
+      }
+    `;
+
+    const response = await fetch("https://backboard.railway.app/graphql/v2", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${railwayToken}`,
+      },
+      body: JSON.stringify({
+        query: mutation,
+        variables: {
+          input: {
+            projectId,
+            environmentId,
+            serviceId,
+            variables: { NATIONBUILDER_ACCESS_TOKEN: accessToken },
+          },
+        },
+      }),
+    });
+
+    const data = await response.json() as { errors?: { message: string }[] };
+    if (data.errors?.length) {
+      console.error("Railway variable update error:", data.errors[0].message);
+    } else {
+      console.error("OAuth token persisted to Railway env var");
+    }
+  } catch (err) {
+    console.error("Failed to persist token to Railway:", err);
+  }
+}
 
 function getConfig() {
   const slug = process.env.NATIONBUILDER_SLUG!;
@@ -88,6 +135,7 @@ export async function refreshTokenIfNeeded(): Promise<void> {
     };
 
     console.error("OAuth token refreshed successfully");
+    persistTokenToRailway(data.access_token).catch(() => {});
   } catch (error) {
     console.error("Token refresh error:", error);
   }
@@ -194,6 +242,9 @@ export function createOAuthRouter(): Router {
           ? Date.now() + data.expires_in * 1000
           : null,
       };
+
+      // Persist to Railway env var so token survives restarts
+      persistTokenToRailway(data.access_token).catch(() => {});
 
       const expiryInfo = data.expires_in
         ? `Token expires in ${Math.round(data.expires_in / 3600)} hours (auto-refresh enabled).`
