@@ -12,6 +12,7 @@ import type {
   QueryParams,
 } from "../types/index.js";
 import { RateLimiter } from "../utils/rateLimiter.js";
+import { reportError } from "../utils/errorReporter.js";
 
 export interface NationBuilderClient {
   get<T>(resource: string, params?: QueryParams): Promise<JsonApiResponse<T>>;
@@ -161,6 +162,13 @@ export function createNationBuilderClient(
         }
       }
     }
+
+    reportError({
+      category: "api_error",
+      message: lastError?.message || "Request failed after retries",
+      rawError: lastError,
+      context: { method, url },
+    });
 
     throw lastError || new Error("Request failed after retries");
   }

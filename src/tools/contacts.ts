@@ -9,6 +9,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { ContactAttributes, QueryParams } from "../types/index.js";
 import { formatContact, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { reportError } from "../utils/errorReporter.js";
 
 export function registerContactTools(
   server: McpServer,
@@ -60,6 +61,7 @@ export function registerContactTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "log_contact failed", rawError: error, context: { person_id: params.person_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error logging contact: ${error instanceof Error ? error.message : String(error)}` }],
@@ -116,6 +118,7 @@ export function registerContactTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "list_contacts failed", rawError: error, context: { person_id: params.person_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error listing contacts: ${error instanceof Error ? error.message : String(error)}` }],

@@ -9,6 +9,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { ListAttributes, SignupAttributes, QueryParams } from "../types/index.js";
 import { formatList, formatSignup, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { reportError } from "../utils/errorReporter.js";
 
 export function registerListTools(
   server: McpServer,
@@ -58,6 +59,7 @@ export function registerListTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "list_lists failed", rawError: error });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error listing lists: ${error instanceof Error ? error.message : String(error)}` }],
@@ -117,6 +119,7 @@ export function registerListTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "get_list_people failed", rawError: error, context: { list_id: params.list_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error getting list people: ${error instanceof Error ? error.message : String(error)}` }],

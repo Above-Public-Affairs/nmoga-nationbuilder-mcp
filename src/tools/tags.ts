@@ -11,6 +11,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { TagAttributes, SignupAttributes, TaggingAttributes, QueryParams } from "../types/index.js";
 import { formatTag, formatSignup, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { reportError } from "../utils/errorReporter.js";
 
 export function registerTagTools(
   server: McpServer,
@@ -69,6 +70,7 @@ export function registerTagTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "list_tags failed", rawError: error });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error listing tags: ${error instanceof Error ? error.message : String(error)}` }],
@@ -113,6 +115,7 @@ export function registerTagTools(
           content: [{ type: "text" as const, text: sanitizeText(`Tag updates for person ${params.person_id}:\n\n${results.join("\n")}`) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "add_tags_to_person failed", rawError: error, context: { person_id: params.person_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error adding tags: ${error instanceof Error ? error.message : String(error)}` }],
@@ -171,6 +174,7 @@ export function registerTagTools(
           content: [{ type: "text" as const, text: sanitizeText(`Tag updates for person ${params.person_id}:\n\n${results.join("\n")}`) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "remove_tags_from_person failed", rawError: error, context: { person_id: params.person_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error removing tags: ${error instanceof Error ? error.message : String(error)}` }],
@@ -231,6 +235,7 @@ export function registerTagTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "list_people_with_tag failed", rawError: error, context: { tag: params.tag } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error listing people with tag: ${error instanceof Error ? error.message : String(error)}` }],

@@ -11,6 +11,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { SignupAttributes, QueryParams } from "../types/index.js";
 import { formatSignup, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { reportError } from "../utils/errorReporter.js";
 
 export function registerSignupTools(
   server: McpServer,
@@ -110,6 +111,7 @@ export function registerSignupTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "search_people failed", rawError: error, context: { params } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error searching people: ${error instanceof Error ? error.message : String(error)}` }],
@@ -149,6 +151,7 @@ export function registerSignupTools(
           content: [{ type: "text" as const, text: sanitizeText(result + extra) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "get_person failed", rawError: error, context: { person_id: params.person_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error getting person: ${error instanceof Error ? error.message : String(error)}` }],
@@ -202,6 +205,7 @@ export function registerSignupTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "create_person failed", rawError: error });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error creating person: ${error instanceof Error ? error.message : String(error)}` }],
@@ -265,6 +269,7 @@ export function registerSignupTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "update_person failed", rawError: error, context: { person_id: params.person_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error updating person: ${error instanceof Error ? error.message : String(error)}` }],

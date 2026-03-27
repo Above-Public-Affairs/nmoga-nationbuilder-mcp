@@ -10,6 +10,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { EventAttributes, EventRsvpAttributes, QueryParams } from "../types/index.js";
 import { formatEvent, formatRsvp, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { reportError } from "../utils/errorReporter.js";
 
 export function registerEventTools(
   server: McpServer,
@@ -80,6 +81,7 @@ export function registerEventTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "list_events failed", rawError: error });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error listing events: ${error instanceof Error ? error.message : String(error)}` }],
@@ -107,6 +109,7 @@ export function registerEventTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "get_event failed", rawError: error, context: { event_id: params.event_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error getting event: ${error instanceof Error ? error.message : String(error)}` }],
@@ -163,6 +166,7 @@ export function registerEventTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "list_event_rsvps failed", rawError: error, context: { event_id: params.event_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error listing RSVPs: ${error instanceof Error ? error.message : String(error)}` }],

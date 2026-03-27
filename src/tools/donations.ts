@@ -9,6 +9,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { DonationAttributes, QueryParams } from "../types/index.js";
 import { formatDonation, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { reportError } from "../utils/errorReporter.js";
 
 export function registerDonationTools(
   server: McpServer,
@@ -97,6 +98,7 @@ export function registerDonationTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "list_donations failed", rawError: error });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error listing donations: ${error instanceof Error ? error.message : String(error)}` }],
@@ -140,6 +142,7 @@ export function registerDonationTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
+        reportError({ category: "tool_error", message: "get_donation failed", rawError: error, context: { donation_id: params.donation_id } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error getting donation: ${error instanceof Error ? error.message : String(error)}` }],
