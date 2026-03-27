@@ -52,6 +52,45 @@ export function registerSignupTools(
         .boolean()
         .optional()
         .describe("Filter to organizations only (true) or people only (false)"),
+      note_contains: z
+        .string()
+        .optional()
+        .describe("Filter by note content (partial match)"),
+      donations_min_cents: z
+        .number()
+        .int()
+        .optional()
+        .describe("Minimum lifetime donation amount in cents (e.g. 10000 = $100)"),
+      donations_max_cents: z
+        .number()
+        .int()
+        .optional()
+        .describe("Maximum lifetime donation amount in cents"),
+      state: z
+        .string()
+        .optional()
+        .describe("Filter by registered address state (e.g. 'NM', 'TX')"),
+      city: z
+        .string()
+        .optional()
+        .describe("Filter by registered address city"),
+      has_email: z
+        .boolean()
+        .optional()
+        .describe("Filter for people with email (true) or without email (false)"),
+      has_phone: z
+        .boolean()
+        .optional()
+        .describe("Filter for people with phone (true) or without phone (false)"),
+      sort_by: z
+        .enum(["first_name", "last_name", "created_at", "updated_at", "support_level"])
+        .optional()
+        .describe("Field to sort results by"),
+      sort_order: z
+        .enum(["asc", "desc"])
+        .optional()
+        .default("asc")
+        .describe("Sort direction (default: asc)"),
       page_size: z
         .number()
         .int()
@@ -107,6 +146,48 @@ export function registerSignupTools(
 
         if (params.is_organization != null) {
           filter.is_organization = String(params.is_organization);
+        }
+
+        if (params.note_contains) {
+          filter.note = { match: params.note_contains };
+        }
+
+        if (params.donations_min_cents != null) {
+          filter.donations_amount_in_cents = {
+            ...(filter.donations_amount_in_cents as Record<string, string> || {}),
+            gte: String(params.donations_min_cents),
+          };
+        }
+
+        if (params.donations_max_cents != null) {
+          filter.donations_amount_in_cents = {
+            ...(filter.donations_amount_in_cents as Record<string, string> || {}),
+            lte: String(params.donations_max_cents),
+          };
+        }
+
+        if (params.state) {
+          filter.registered_address_state = params.state;
+        }
+
+        if (params.city) {
+          filter.registered_address_city = params.city;
+        }
+
+        if (params.has_email === true) {
+          filter.email = { not_eq: "null" };
+        } else if (params.has_email === false) {
+          filter.email = "null";
+        }
+
+        if (params.has_phone === true) {
+          filter.phone = { not_eq: "null" };
+        } else if (params.has_phone === false) {
+          filter.phone = "null";
+        }
+
+        if (params.sort_by) {
+          queryParams.sort = params.sort_order === "desc" ? `-${params.sort_by}` : params.sort_by;
         }
 
         if (Object.keys(filter).length > 0) {
@@ -293,6 +374,95 @@ export function registerSignupTools(
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error updating person: ${error instanceof Error ? error.message : String(error)}` }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "advanced_search",
+    "Power-user search with full NationBuilder V2 filter syntax. Pass filters as key-value pairs where values can be strings (exact match) or objects with operators (match, gte, lte, gt, lt, not_eq, prefix, suffix). Example: filters={\"support_level\":{\"gte\":\"1\",\"lte\":\"3\"}, \"note\":{\"match\":\"volunteer\"}}",
+    {
+      filters: z
+        .record(z.string(), z.union([z.string(), z.record(z.string(), z.string())]))
+        .optional()
+        .describe("Filter object — keys are field names, values are strings or {operator: value} objects"),
+      sort: z
+        .string()
+        .optional()
+        .describe("Sort field. Prefix with - for descending (e.g. '-created_at')"),
+      include: z
+        .string()
+        .optional()
+        .describe("Comma-separated relationships to sideload (e.g. 'tags,memberships,petition_signatures')"),
+      fields: z
+        .string()
+        .optional()
+        .describe("Comma-separated sparse field list (e.g. 'first_name,last_name,email,support_level')"),
+      page_size: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe("Results per page (max 100)"),
+      page_number: z
+        .number()
+        .int()
+        .min(1)
+        .default(1)
+        .describe("Page number"),
+    },
+    async (params) => {
+      try {
+        const queryParams: QueryParams = {
+          page_size: params.page_size,
+          page_number: params.page_number,
+        };
+
+        if (params.filters) {
+          queryParams.filter = params.filters;
+        }
+
+        if (params.sort) {
+          queryParams.sort = params.sort;
+        }
+
+        if (params.include) {
+          queryParams.include = params.include;
+        }
+
+        if (params.fields) {
+          queryParams.fields = { signups: params.fields };
+        } else {
+          queryParams.fields = {
+            signups:
+              "first_name,last_name,full_name,email,phone,mobile,support_level,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,custom_values,created_at,updated_at",
+          };
+        }
+
+        const response = await client.get<SignupAttributes>("signups", queryParams);
+
+        if (response.data.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: "No people found matching your search criteria." }],
+          };
+        }
+
+        let result = `Found ${response.meta?.total ?? response.data.length} people:\n\n`;
+        for (const person of response.data) {
+          result += formatSignup(person) + "\n\n";
+        }
+        result += formatPagination(response, params.page_number, params.page_size);
+
+        return {
+          content: [{ type: "text" as const, text: sanitizeText(result) }],
+        };
+      } catch (error) {
+        reportError({ category: "tool_error", message: "advanced_search failed", rawError: error, context: { params } });
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Error in advanced search: ${error instanceof Error ? error.message : String(error)}` }],
         };
       }
     }

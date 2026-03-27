@@ -26,6 +26,16 @@ import { registerDonationTools } from "./tools/donations.js";
 import { registerEventTools } from "./tools/events.js";
 import { registerListTools } from "./tools/lists.js";
 import { registerRelationshipTools } from "./tools/relationships.js";
+import { registerMembershipTools } from "./tools/memberships.js";
+import { registerMembershipTypeTools } from "./tools/membershipTypes.js";
+import { registerPathTools } from "./tools/paths.js";
+import { registerNativeRelationshipTools } from "./tools/nativeRelationships.js";
+import { registerSignupProfileTools } from "./tools/signupProfiles.js";
+import { registerPetitionTools } from "./tools/petitions.js";
+import { registerMailingTools } from "./tools/mailings.js";
+import { registerPageTools } from "./tools/pages.js";
+import { registerAutomationTools } from "./tools/automations.js";
+import { registerImportTools } from "./tools/imports.js";
 
 // CRITICAL: Never use console.log() - it corrupts JSON-RPC on stdout
 // Always use console.error() for any logging/debugging
@@ -68,6 +78,16 @@ function createServer(
   registerEventTools(server, client);
   registerListTools(server, client);
   registerRelationshipTools(server, client);
+  registerMembershipTools(server, client);
+  registerMembershipTypeTools(server, client);
+  registerPathTools(server, client);
+  registerNativeRelationshipTools(server, client);
+  registerSignupProfileTools(server, client);
+  registerPetitionTools(server, client);
+  registerMailingTools(server, client);
+  registerPageTools(server, client);
+  registerAutomationTools(server, client);
+  registerImportTools(server, client);
 
   return server;
 }
@@ -212,7 +232,7 @@ async function startStdioServer(slug: string, staticToken: string | null): Promi
 
   console.error("Starting NMOGA NationBuilder MCP server (stdio)...");
   console.error(
-    "Available tools: People, Tags, Contacts, Donations, Events, Lists"
+    "Available tools: People, Tags, Contacts, Donations, Events, Lists, Memberships, Paths, Relationships, Profiles, Petitions, Mailings, Pages, Automations, Imports"
   );
 
   await server.connect(transport);

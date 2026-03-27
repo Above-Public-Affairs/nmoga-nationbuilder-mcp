@@ -167,3 +167,131 @@ export interface EventRsvpAttributes {
   updated_at: string | null;
   [key: string]: unknown;
 }
+
+export interface MembershipAttributes {
+  name: string | null;
+  status: string | null;
+  started_at: string | null;
+  expires_on: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface MembershipTypeAttributes {
+  name: string | null;
+  description: string | null;
+  amount_in_cents: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface PathAttributes {
+  name: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface PathJourneyAttributes {
+  status: string | null;
+  current_step_name: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface NativeRelationshipAttributes {
+  relationship_type: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface SignupProfileAttributes {
+  bio: string | null;
+  headline: string | null;
+  website: string | null;
+  facebook_url: string | null;
+  twitter_url: string | null;
+  linkedin_url: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface PetitionAttributes {
+  name: string | null;
+  description: string | null;
+  slug: string | null;
+  signatures_count: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface PetitionSignatureAttributes {
+  comment: string | null;
+  is_private: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface MailingAttributes {
+  name: string | null;
+  subject: string | null;
+  status: string | null;
+  sent_at: string | null;
+  recipients_count: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface PageAttributes {
+  name: string | null;
+  slug: string | null;
+  page_type: string | null;
+  status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface SiteAttributes {
+  name: string | null;
+  domain: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface AutomationAttributes {
+  name: string | null;
+  status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface AutomationEnrollmentAttributes {
+  status: string | null;
+  enrolled_at: string | null;
+  completed_at: string | null;
+  created_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface ImportAttributes {
+  status: string | null;
+  import_type: string | null;
+  created_count: number | null;
+  updated_count: number | null;
+  error_count: number | null;
+  created_at: string | null;
+  [key: string]: unknown;
+}
