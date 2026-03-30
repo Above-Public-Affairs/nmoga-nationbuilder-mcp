@@ -3,6 +3,8 @@
  * - list_lists: List all saved lists/segments
  * - get_list_people: Get people in a specific list
  * - create_list: Create a new list/segment
+ * - add_person_to_list: Add a person/signup to a list
+ * - remove_person_from_list: Remove a person/signup from a list
  */
 
 import { z } from "zod";
@@ -165,6 +167,79 @@ export function registerListTools(
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error creating list: ${error instanceof Error ? error.message : String(error)}` }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "add_person_to_list",
+    "Add a person (signup) to a saved list in NationBuilder.",
+    {
+      list_id: z.string().describe("The NationBuilder list ID"),
+      person_id: z.string().describe("The signup ID of the person to add"),
+    },
+    async (params) => {
+      try {
+        await client.create<Record<string, unknown>>("list_memberships", {
+          data: {
+            type: "list_memberships",
+            attributes: {},
+            relationships: {
+              list: { data: { id: params.list_id, type: "lists" } },
+              signup: { data: { id: params.person_id, type: "signups" } },
+            },
+          },
+        });
+
+        return {
+          content: [{ type: "text" as const, text: sanitizeText(`Person ${params.person_id} added to list ${params.list_id} successfully.`) }],
+        };
+      } catch (error) {
+        reportError({ category: "tool_error", message: "add_person_to_list failed", rawError: error, context: { list_id: params.list_id, person_id: params.person_id } });
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Error adding person to list: ${error instanceof Error ? error.message : String(error)}` }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "remove_person_from_list",
+    "Remove a person (signup) from a saved list in NationBuilder.",
+    {
+      list_id: z.string().describe("The NationBuilder list ID"),
+      person_id: z.string().describe("The signup ID of the person to remove"),
+    },
+    async (params) => {
+      try {
+        // Find the list_membership record ID by filtering on list and signup
+        const response = await client.get<Record<string, unknown>>("list_memberships", {
+          filter: {
+            list_id: params.list_id,
+            signup_id: params.person_id,
+          },
+          page_size: 1,
+        });
+
+        if (!response.data || response.data.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: `Person ${params.person_id} is not in list ${params.list_id}.` }],
+          };
+        }
+
+        const membershipId = response.data[0].id;
+        await client.delete("list_memberships", membershipId);
+
+        return {
+          content: [{ type: "text" as const, text: sanitizeText(`Person ${params.person_id} removed from list ${params.list_id} successfully.`) }],
+        };
+      } catch (error) {
+        reportError({ category: "tool_error", message: "remove_person_from_list failed", rawError: error, context: { list_id: params.list_id, person_id: params.person_id } });
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Error removing person from list: ${error instanceof Error ? error.message : String(error)}` }],
         };
       }
     }

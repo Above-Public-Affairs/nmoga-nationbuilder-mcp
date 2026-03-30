@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026-03-29]
+
+### Added
+- `add_person_to_list` — Add a person to a saved list by list ID and signup ID
+- `remove_person_from_list` — Remove a person from a saved list by list ID and signup ID
+
 ## [2026-03-26]
 
 ### Added
