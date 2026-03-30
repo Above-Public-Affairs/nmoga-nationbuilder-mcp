@@ -21,6 +21,7 @@ export interface NationBuilderClient {
   create<T>(resource: string, payload: JsonApiCreatePayload<T>): Promise<JsonApiDocument<T>>;
   update<T>(resource: string, id: string, payload: JsonApiUpdatePayload<T>): Promise<JsonApiDocument<T>>;
   delete(resource: string, id: string): Promise<void>;
+  v1Request<R>(method: string, path: string, body?: unknown): Promise<R>;
 }
 
 export function createNationBuilderClient(
@@ -262,6 +263,12 @@ export function createNationBuilderClient(
     async delete(resource: string, id: string): Promise<void> {
       const url = `${baseUrl}/${resource}/${id}`;
       await makeRequest<void>("DELETE", url);
+    },
+
+    async v1Request<R>(method: string, path: string, body?: unknown): Promise<R> {
+      const v1BaseUrl = baseUrl.replace("/api/v2", "/api/v1");
+      const url = `${v1BaseUrl}${path}`;
+      return makeRequest<R>(method, url, body);
     },
   };
 }

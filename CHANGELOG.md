@@ -6,6 +6,9 @@
 - `add_person_to_list` — Add a person to a saved list by list ID and signup ID
 - `remove_person_from_list` — Remove a person from a saved list by list ID and signup ID
 
+### Fixed
+- `add_person_to_list` and `remove_person_from_list` now use the V1 API (NationBuilder V2 has no list membership resource)
+
 ## [2026-03-26]
 
 ### Added

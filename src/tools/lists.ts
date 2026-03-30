@@ -181,15 +181,8 @@ export function registerListTools(
     },
     async (params) => {
       try {
-        await client.create<Record<string, unknown>>("list_memberships", {
-          data: {
-            type: "list_memberships",
-            attributes: {},
-            relationships: {
-              list: { data: { id: params.list_id, type: "lists" } },
-              signup: { data: { id: params.person_id, type: "signups" } },
-            },
-          },
+        await client.v1Request("POST", `/lists/${params.list_id}/people`, {
+          people_ids: [parseInt(params.person_id, 10)],
         });
 
         return {
@@ -214,23 +207,9 @@ export function registerListTools(
     },
     async (params) => {
       try {
-        // Find the list_membership record ID by filtering on list and signup
-        const response = await client.get<Record<string, unknown>>("list_memberships", {
-          filter: {
-            list_id: params.list_id,
-            signup_id: params.person_id,
-          },
-          page_size: 1,
+        await client.v1Request("DELETE", `/lists/${params.list_id}/people`, {
+          people_ids: [parseInt(params.person_id, 10)],
         });
-
-        if (!response.data || response.data.length === 0) {
-          return {
-            content: [{ type: "text" as const, text: `Person ${params.person_id} is not in list ${params.list_id}.` }],
-          };
-        }
-
-        const membershipId = response.data[0].id;
-        await client.delete("list_memberships", membershipId);
 
         return {
           content: [{ type: "text" as const, text: sanitizeText(`Person ${params.person_id} removed from list ${params.list_id} successfully.`) }],
