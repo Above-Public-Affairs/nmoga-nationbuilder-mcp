@@ -37,28 +37,60 @@ export function registerNativeRelationshipTools(
     },
     async (params) => {
       try {
-        const queryParams: QueryParams = {
+        // Relationships are directional: query both sides to find all relationships
+        // where this signup appears as either the first or second party
+        const baseParams = {
           page_size: params.page_size,
           page_number: params.page_number,
           include: "first_signup,second_signup",
-          filter: {
-            first_signup_id: params.signup_id,
-          },
         };
 
-        const response = await client.get<NativeRelationshipAttributes>("relationships", queryParams);
+        const [firstResponse, secondResponse] = await Promise.all([
+          client.get<NativeRelationshipAttributes>("relationships", {
+            ...baseParams,
+            filter: { first_signup_id: params.signup_id },
+          }),
+          client.get<NativeRelationshipAttributes>("relationships", {
+            ...baseParams,
+            filter: { second_signup_id: params.signup_id },
+          }),
+        ]);
 
-        if (response.data.length === 0) {
+        // Merge and deduplicate by relationship ID
+        const seenIds = new Set<string>();
+        const allRelationships: typeof firstResponse.data = [];
+        const allIncluded: typeof firstResponse.included = [];
+
+        for (const rel of [...firstResponse.data, ...secondResponse.data]) {
+          if (!seenIds.has(rel.id)) {
+            seenIds.add(rel.id);
+            allRelationships.push(rel);
+          }
+        }
+
+        // Merge included sideloads (first_signup, second_signup records)
+        const seenIncludedIds = new Set<string>();
+        for (const inc of [...(firstResponse.included || []), ...(secondResponse.included || [])]) {
+          const key = `${inc.type}:${inc.id}`;
+          if (!seenIncludedIds.has(key)) {
+            seenIncludedIds.add(key);
+            allIncluded.push(inc);
+          }
+        }
+
+        if (allRelationships.length === 0) {
           return {
             content: [{ type: "text" as const, text: `No relationships found for person ${params.signup_id}.` }],
           };
         }
 
         let result = `Relationships for person ${params.signup_id}:\n\n`;
-        for (const rel of response.data) {
-          result += formatNativeRelationship(rel, response.included) + "\n\n";
+        for (const rel of allRelationships) {
+          result += formatNativeRelationship(rel, allIncluded) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
+
+        const totalResults = allRelationships.length;
+        result += `Showing ${totalResults} relationship${totalResults === 1 ? "" : "s"}.`;
 
         return {
           content: [{ type: "text" as const, text: sanitizeText(result) }],
