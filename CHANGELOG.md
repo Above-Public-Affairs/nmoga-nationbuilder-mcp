@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-03-30]
+
+### Fixed
+- `get_signup_profile` and `update_signup_profile` now use the correct two-step lookup: sideload the signup to get the profile ID, then fetch/update by that ID (confirmed with NB support)
+- `list_event_rsvps` restored using correct top-level `/api/v2/event_rsvps` endpoint (confirmed with NB support)
+
+### Removed
+- `list_signup_sources` — NB support confirmed this endpoint does not exist in V2
+- `list_identity_mappings` — NB support confirmed this endpoint does not exist in V2
+
 ## [2026-03-29]
 
 ### Added

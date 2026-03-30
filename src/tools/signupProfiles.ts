@@ -1,15 +1,33 @@
 /**
  * Signup Profile tools for NationBuilder
- * - get_signup_profile: Get profile for a person
+ * - get_signup_profile: Get profile for a person (bio, headline, social links, etc.)
  * - update_signup_profile: Update profile fields (with overwrite warning)
+ *
+ * NB confirmed: signup_profile ID must be looked up via sideloading on the signup,
+ * then fetched directly at /api/v2/signup_profiles/{signup_profile_id}
  */
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
-import type { SignupProfileAttributes, QueryParams } from "../types/index.js";
+import type { SignupProfileAttributes } from "../types/index.js";
 import { formatSignupProfile, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
+
+async function getProfileId(
+  client: NationBuilderClient,
+  signup_id: string
+): Promise<string | null> {
+  const signupResponse = await client.getById("signups", signup_id, {
+    include: "signup_profile",
+  });
+
+  // The profile ID comes from the relationship data on the signup
+  const rel = (signupResponse.data as { relationships?: { signup_profile?: { data?: { id?: string } } } })
+    .relationships?.signup_profile?.data;
+
+  return rel?.id ?? null;
+}
 
 export function registerSignupProfileTools(
   server: McpServer,
@@ -23,21 +41,16 @@ export function registerSignupProfileTools(
     },
     async (params) => {
       try {
-        // Try fetching profile via the signup_profiles filter
-        const queryParams: QueryParams = {
-          filter: { signup_id: params.signup_id },
-          page_size: 1,
-        };
+        const profileId = await getProfileId(client, params.signup_id);
 
-        const response = await client.get<SignupProfileAttributes>("signup_profiles", queryParams);
-
-        if (response.data.length === 0) {
+        if (!profileId) {
           return {
             content: [{ type: "text" as const, text: `No profile found for person ${params.signup_id}.` }],
           };
         }
 
-        const result = formatSignupProfile(response.data[0]);
+        const response = await client.getById<SignupProfileAttributes>("signup_profiles", profileId);
+        const result = formatSignupProfile(response.data);
 
         return {
           content: [{ type: "text" as const, text: sanitizeText(result) }],
@@ -80,21 +93,13 @@ export function registerSignupProfileTools(
           };
         }
 
-        // First find the profile ID
-        const queryParams: QueryParams = {
-          filter: { signup_id },
-          page_size: 1,
-        };
+        const profileId = await getProfileId(client, signup_id);
 
-        const existing = await client.get<SignupProfileAttributes>("signup_profiles", queryParams);
-
-        if (existing.data.length === 0) {
+        if (!profileId) {
           return {
             content: [{ type: "text" as const, text: `No profile found for person ${signup_id}. The person may not have a profile yet.` }],
           };
         }
-
-        const profileId = existing.data[0].id;
 
         const response = await client.update<SignupProfileAttributes>(
           "signup_profiles",
