@@ -12,6 +12,7 @@ import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { SignupAttributes, QueryParams } from "../types/index.js";
 import { formatSignup, formatPagination, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
+import { resolveTagByName, getAllSignupIdsForTagId } from "../utils/tagLookup.js";
 
 export function registerSignupTools(
   server: McpServer,
@@ -381,12 +382,16 @@ export function registerSignupTools(
 
   server.tool(
     "advanced_search",
-    "Power-user search with full NationBuilder V2 filter syntax. Pass filters as key-value pairs where values can be strings (exact match) or objects with operators (match, gte, lte, gt, lt, not_eq, prefix, suffix). Example: filters={\"support_level\":{\"gte\":\"1\",\"lte\":\"3\"}, \"note\":{\"match\":\"volunteer\"}}",
+    "Power-user search with full NationBuilder V2 filter syntax. Pass filters as key-value pairs where values can be strings (exact match) or objects with operators (match, gte, lte, gt, lt, not_eq, prefix, suffix). Example: filters={\"support_level\":{\"gte\":\"1\",\"lte\":\"3\"}, \"note\":{\"match\":\"volunteer\"}}. Use the top-level `tag` parameter for tag filtering — the V2 signups endpoint has no tag attribute, so passing `tags` / `tag_list` / etc. inside `filters` will either error or be silently ignored.",
     {
       filters: z
         .record(z.string(), z.union([z.string(), z.record(z.string(), z.string())]))
         .optional()
-        .describe("Filter object — keys are field names, values are strings or {operator: value} objects"),
+        .describe("Filter object — keys are field names, values are strings or {operator: value} objects. Do NOT put tag filters here; use the `tag` parameter."),
+      tag: z
+        .string()
+        .optional()
+        .describe("Tag name to filter by (case-insensitive). Resolved to the tag's ID and intersected with `filters` so e.g. tag='cmte_legislative' + filters={state:'NM'} returns committee members in NM."),
       sort: z
         .string()
         .optional()
@@ -420,8 +425,47 @@ export function registerSignupTools(
           page_number: params.page_number,
         };
 
-        if (params.filters) {
-          queryParams.filter = params.filters;
+        const filter: Record<string, string | Record<string, string>> = {
+          ...(params.filters ?? {}),
+        };
+
+        let tagHeader: string | null = null;
+        let tagTruncated = false;
+        if (params.tag) {
+          const resolved = await resolveTagByName(client, params.tag);
+          if (!resolved) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Tag "${params.tag}" not found. Tag names are looked up case-insensitively, but the tag must exist in the nation.`,
+                },
+              ],
+            };
+          }
+          const tagged = await getAllSignupIdsForTagId(client, resolved.id);
+          tagTruncated = tagged.truncated;
+          if (tagged.signupIds.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Tag "${resolved.name}" exists but has no people on it (total: ${tagged.totalCount ?? 0}).`,
+                },
+              ],
+            };
+          }
+          // Intersect tag membership with the rest of the filter set via
+          // filter[id][in]=<csv>. The JSON:API client encodes the operator
+          // form for free.
+          filter.id = { in: tagged.signupIds.join(",") };
+          tagHeader = `Tag "${resolved.name}" — ${tagged.totalCount ?? tagged.signupIds.length} people on tag${
+            tagTruncated ? " (truncated to 5000 for intersection)" : ""
+          }`;
+        }
+
+        if (Object.keys(filter).length > 0) {
+          queryParams.filter = filter;
         }
 
         if (params.sort) {
@@ -444,12 +488,15 @@ export function registerSignupTools(
         const response = await client.get<SignupAttributes>("signups", queryParams);
 
         if (response.data.length === 0) {
+          const noResultsHeader = tagHeader ? `${tagHeader}\n\n` : "";
           return {
-            content: [{ type: "text" as const, text: "No people found matching your search criteria." }],
+            content: [{ type: "text" as const, text: sanitizeText(`${noResultsHeader}No people found matching your search criteria.`) }],
           };
         }
 
-        let result = `Found ${response.meta?.total ?? response.data.length} people:\n\n`;
+        let result = "";
+        if (tagHeader) result += `${tagHeader}\n`;
+        result += `Found ${response.meta?.total ?? response.data.length} people:\n\n`;
         for (const person of response.data) {
           result += formatSignup(person) + "\n\n";
         }

@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026-04-28]
+
+### Fixed
+- `list_people_with_tag` now actually scopes results to the requested tag. Previously the tool sent `filter[tag]=<name>` to the V2 `signups` endpoint, which has no tag attribute, so the filter was silently dropped and the tool returned the first page of *all* signups regardless of input. It now resolves the tag name to an ID and queries `signup_taggings` (sideloading signups via `include=signup`).
+- Tag-name lookup is now case-insensitive — `cmte_legislative` and `CMTE_Legislative` both resolve to the same tag.
+- `list_people_with_tag` response now includes the total number of people on the tag, so callers don't have to paginate to get the count.
+
+### Added
+- `advanced_search` accepts a top-level `tag` parameter (case-insensitive). The tag is intersected with the rest of the filter set via `filter[id][in]=…`, so e.g. `tag="wg_seismicity"` + `filters={state:"NM"}` returns workgroup members in NM.
+- New shared helpers `resolveTagByName` and `getTaggingsPageForTagId` / `getAllSignupIdsForTagId` in `src/utils/tagLookup.ts`.
+
 ## [2026-03-30]
 
 ### Fixed

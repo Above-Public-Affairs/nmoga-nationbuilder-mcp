@@ -13,6 +13,7 @@
 - [x] NationBuilder API client with retries and error handling
 - [x] People/Signups tools (search, get, create, update)
 - [x] Tags tools (list, add, remove, list people by tag)
+- [x] Tag-filter fix (2026-04-28): `list_people_with_tag` and `advanced_search` now route through `signup_taggings` instead of the broken V2 `signups` tag filter; case-insensitive name lookup; total counts in response
 - [x] Contacts tools (log interaction, list history)
 - [x] Donations tools (list, get details)
 - [x] Events tools (list, get details, list RSVPs)

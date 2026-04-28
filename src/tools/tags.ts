@@ -12,6 +12,7 @@ import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { TagAttributes, SignupAttributes, TaggingAttributes, QueryParams } from "../types/index.js";
 import { formatTag, formatSignup, formatPagination, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
+import { resolveTagByName, getTaggingsPageForTagId } from "../utils/tagLookup.js";
 
 export function registerTagTools(
   server: McpServer,
@@ -205,9 +206,9 @@ export function registerTagTools(
 
   server.tool(
     "list_people_with_tag",
-    "List all people who have a specific tag in NationBuilder.",
+    "List people who have a specific tag in NationBuilder. Tag-name lookup is case-insensitive (e.g. 'cmte_legislative' matches 'CMTE_Legislative'). The response includes the total number of people on the tag so you don't have to paginate to see the count.",
     {
-      tag: z.string().describe("The tag name to search for"),
+      tag: z.string().describe("The tag name to search for (case-insensitive)"),
       page_size: z
         .number()
         .int()
@@ -224,32 +225,77 @@ export function registerTagTools(
     },
     async (params) => {
       try {
-        // Search signups filtered by tag
-        const queryParams: QueryParams = {
-          page_size: params.page_size,
-          page_number: params.page_number,
-          filter: {
-            tag: params.tag,
-          },
-          fields: {
-            signups:
-              "first_name,last_name,full_name,email,phone,mobile,support_level,is_volunteer,is_donor,registered_address_city,registered_address_state,created_at",
-          },
-        };
-
-        const response = await client.get<SignupAttributes>("signups", queryParams);
-
-        if (response.data.length === 0) {
+        const resolved = await resolveTagByName(client, params.tag);
+        if (!resolved) {
           return {
-            content: [{ type: "text" as const, text: `No people found with tag "${params.tag}".` }],
+            content: [
+              {
+                type: "text" as const,
+                text: `Tag "${params.tag}" not found. Tag names are looked up case-insensitively, but the tag must exist in the nation. Use list_tags to browse available tags.`,
+              },
+            ],
           };
         }
 
-        let result = `People with tag "${params.tag}":\n\n`;
-        for (const person of response.data) {
-          result += formatSignup(person) + "\n\n";
+        const signupFields =
+          "first_name,last_name,full_name,email,phone,mobile,support_level,is_volunteer,is_donor,registered_address_city,registered_address_state,created_at";
+
+        const taggings = await getTaggingsPageForTagId(client, resolved.id, {
+          page: params.page_number,
+          pageSize: params.page_size,
+          includeSignup: true,
+          signupFields,
+        });
+
+        const totalLine =
+          taggings.totalCount !== null
+            ? `Tag "${resolved.name}" — ${taggings.totalCount} people total`
+            : `Tag "${resolved.name}"`;
+
+        if (taggings.signupIds.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: sanitizeText(
+                  `${totalLine}\n\n(No people on page ${params.page_number}.)`
+                ),
+              },
+            ],
+          };
         }
-        result += formatPagination(response, params.page_number, params.page_size);
+
+        // Build a lookup of sideloaded signups, then iterate in tagging order
+        // so pagination ordering matches the tagging response.
+        const included = taggings.raw.included ?? [];
+        const signupsById = new Map<
+          string,
+          { id: string; type: string; attributes: SignupAttributes }
+        >();
+        for (const resource of included) {
+          if (resource.type === "signups") {
+            signupsById.set(resource.id, {
+              id: resource.id,
+              type: resource.type,
+              attributes: resource.attributes as SignupAttributes,
+            });
+          }
+        }
+
+        let result = `${totalLine}\n\n`;
+        for (const signupId of taggings.signupIds) {
+          const signup = signupsById.get(signupId);
+          if (signup) {
+            result += formatSignup(signup) + "\n\n";
+          } else {
+            result += `(signup ${signupId} — details unavailable)\n\n`;
+          }
+        }
+        result += formatPagination(
+          taggings.raw,
+          params.page_number,
+          params.page_size
+        );
 
         return {
           content: [{ type: "text" as const, text: sanitizeText(result) }],

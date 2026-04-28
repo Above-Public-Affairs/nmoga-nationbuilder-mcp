@@ -13,7 +13,7 @@ MCP server that connects Claude to NMOGA's NationBuilder nation. Manage people, 
 | `list_tags` | List all tags with optional search |
 | `add_tags_to_person` | Add tags to a person |
 | `remove_tags_from_person` | Remove tags from a person |
-| `list_people_with_tag` | List people with a specific tag |
+| `list_people_with_tag` | List people with a specific tag (case-insensitive name lookup; includes total count) |
 | `log_contact` | Log a call, email, meeting, or other interaction |
 | `list_contacts` | View interaction history for a person |
 | `list_donations` | List donations with date filtering |
