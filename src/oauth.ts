@@ -10,6 +10,7 @@
 
 import { Router } from "express";
 import { randomBytes, createHash } from "crypto";
+import { reportError } from "./utils/errorReporter.js";
 
 interface TokenData {
   accessToken: string;
@@ -55,53 +56,96 @@ function escapeHtml(str: string): string {
     .replace(/'/g, "&#39;");
 }
 
-/** Persist the access + refresh tokens to Railway env vars so they survive restarts */
-async function persistTokenToRailway(accessToken: string, refreshToken?: string | null): Promise<void> {
+/**
+ * Persist the access + refresh tokens to Railway env vars so they survive restarts.
+ *
+ * NationBuilder rotates the refresh token on every refresh, so if this write
+ * fails the copy in Railway's env goes stale immediately — and the next restart
+ * hydrates a dead refresh token, which can't be recovered from without a human
+ * re-running /oauth/authorize. That makes a silent failure here far more
+ * expensive than it looks, so failures are logged loudly and reported.
+ *
+ * Railway accepts two different credential styles and they are NOT
+ * interchangeable: account/workspace tokens go in `Authorization: Bearer`,
+ * project tokens go in the `Project-Access-Token` header. Sending a project
+ * token as a Bearer yields "Not Authorized", so try both before giving up.
+ */
+async function persistTokenToRailway(accessToken: string, refreshToken?: string | null): Promise<boolean> {
   const railwayToken = process.env.RAILWAY_API_TOKEN;
   const projectId = process.env.RAILWAY_PROJECT_ID;
   const environmentId = process.env.RAILWAY_ENVIRONMENT_ID;
   const serviceId = process.env.RAILWAY_SERVICE_ID;
 
-  if (!railwayToken || !projectId || !environmentId || !serviceId) return;
-
-  try {
-    const mutation = `
-      mutation UpsertVariables($input: VariableCollectionUpsertInput!) {
-        variableCollectionUpsert(input: $input)
-      }
-    `;
-
-    const response = await fetch("https://backboard.railway.app/graphql/v2", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${railwayToken}`,
-      },
-      body: JSON.stringify({
-        query: mutation,
-        variables: {
-          input: {
-            projectId,
-            environmentId,
-            serviceId,
-            variables: {
-              NATIONBUILDER_ACCESS_TOKEN: accessToken,
-              ...(refreshToken ? { NATIONBUILDER_REFRESH_TOKEN: refreshToken } : {}),
-            },
-          },
-        },
-      }),
-    });
-
-    const data = await response.json() as { errors?: { message: string }[] };
-    if (data.errors?.length) {
-      console.error("Railway variable update error:", data.errors[0].message);
-    } else {
-      console.error("OAuth token persisted to Railway env var");
-    }
-  } catch (err) {
-    console.error("Failed to persist token to Railway:", err);
+  if (!railwayToken || !projectId || !environmentId || !serviceId) {
+    console.error(
+      "Token persistence skipped — missing Railway config. " +
+      "Tokens will be lost on restart and someone will have to re-run /oauth/authorize."
+    );
+    return false;
   }
+
+  const mutation = `
+    mutation UpsertVariables($input: VariableCollectionUpsertInput!) {
+      variableCollectionUpsert(input: $input)
+    }
+  `;
+
+  const body = JSON.stringify({
+    query: mutation,
+    variables: {
+      input: {
+        projectId,
+        environmentId,
+        serviceId,
+        variables: {
+          NATIONBUILDER_ACCESS_TOKEN: accessToken,
+          ...(refreshToken ? { NATIONBUILDER_REFRESH_TOKEN: refreshToken } : {}),
+        },
+      },
+    },
+  });
+
+  const authStyles: { label: string; headers: Record<string, string> }[] = [
+    { label: "account token", headers: { Authorization: `Bearer ${railwayToken}` } },
+    { label: "project token", headers: { "Project-Access-Token": railwayToken } },
+  ];
+
+  const failures: string[] = [];
+
+  for (const style of authStyles) {
+    try {
+      const response = await fetch("https://backboard.railway.app/graphql/v2", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...style.headers },
+        body,
+      });
+
+      const data = (await response.json()) as { errors?: { message: string }[] };
+
+      if (!data.errors?.length && response.ok) {
+        console.error(`OAuth token persisted to Railway env vars (via ${style.label})`);
+        return true;
+      }
+
+      failures.push(`${style.label}: ${data.errors?.[0]?.message ?? `HTTP ${response.status}`}`);
+    } catch (err) {
+      failures.push(`${style.label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const detail = failures.join(" | ");
+  console.error(
+    `CRITICAL: could not persist NationBuilder tokens to Railway (${detail}). ` +
+    `The refresh token in Railway env is now STALE — this service will lose ` +
+    `NationBuilder access on its next restart until someone re-runs /oauth/authorize. ` +
+    `Fix RAILWAY_API_TOKEN (needs write access to this service's variables).`
+  );
+  reportError({
+    category: "auth_error",
+    message: `NationBuilder token persistence to Railway failed: ${detail}`,
+    context: { projectId, serviceId },
+  });
+  return false;
 }
 
 function getConfig() {
@@ -131,6 +175,38 @@ export function initTokenFromEnv(): void {
     console.error(
       `Loaded token from env vars (refresh token: ${refreshToken ? "yes" : "no"})`
     );
+  }
+}
+
+/**
+ * Exercise the stored refresh token once at startup.
+ *
+ * Hydrating from env leaves expiresAt null, which makes refreshTokenIfNeeded a
+ * no-op — so nothing would touch the token until a user's first tool call took
+ * a 401. Refreshing here means a restart either re-establishes the rotation
+ * chain (and re-persists it) or surfaces a dead refresh token in the deploy
+ * logs immediately, instead of as a broken connector for whoever tries first.
+ */
+export async function bootstrapToken(): Promise<void> {
+  if (!tokenData?.refreshToken) {
+    console.error(
+      "No refresh token available at startup — running on a static token. " +
+      "If NationBuilder rejects it, re-authorize at /oauth/authorize."
+    );
+    return;
+  }
+
+  const ok = await doRefresh();
+  if (!ok) {
+    console.error(
+      "CRITICAL: startup token refresh failed. The stored refresh token is " +
+      "likely stale or revoked, so NationBuilder tool calls will fail. " +
+      "Re-authorize at /oauth/authorize to restore access."
+    );
+    reportError({
+      category: "auth_error",
+      message: "NationBuilder startup token refresh failed — connector has no usable token",
+    });
   }
 }
 

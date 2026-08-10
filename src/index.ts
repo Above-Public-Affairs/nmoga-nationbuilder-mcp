@@ -18,7 +18,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "crypto";
 import express from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
-import { createOAuthRouter, getOAuthToken, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
+import { bootstrapToken, createOAuthRouter, getOAuthToken, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
 import { registerSignupTools } from "./tools/signups.js";
 import { registerTagTools } from "./tools/tags.js";
 import { registerContactTools } from "./tools/contacts.js";
@@ -152,8 +152,32 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
 
   // Track active transports by session ID (Streamable HTTP)
   const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
+  // Last time each session was used, so idle sessions can be reaped
+  const sessionLastSeen = new Map<string, number>();
   // Track active SSE transports (legacy)
   const sseTransports = new Map<string, SSEServerTransport>();
+
+  // Sessions live in memory only. Clients rarely send DELETE (Claude's connector
+  // never does), so onclose alone leaves entries — and their McpServer instances —
+  // behind forever. Reap anything idle past this window.
+  const SESSION_IDLE_MS = 30 * 60 * 1000;
+
+  function dropSession(sessionId: string, reason: string): void {
+    const transport = streamableTransports.get(sessionId);
+    streamableTransports.delete(sessionId);
+    sessionLastSeen.delete(sessionId);
+    if (transport) {
+      console.error(`Dropping session ${sessionId} (${reason})`);
+      void Promise.resolve(transport.close()).catch(() => {});
+    }
+  }
+
+  setInterval(() => {
+    const cutoff = Date.now() - SESSION_IDLE_MS;
+    for (const [sessionId, lastSeen] of sessionLastSeen) {
+      if (lastSeen < cutoff) dropSession(sessionId, "idle timeout");
+    }
+  }, 5 * 60 * 1000);
 
   // Mount OAuth routes
   if (isOAuthConfigured()) {
@@ -179,8 +203,27 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
 
     if (sessionId && streamableTransports.has(sessionId)) {
       // Existing session — route to its transport
+      sessionLastSeen.set(sessionId, Date.now());
       await streamableTransports.get(sessionId)!.handleRequest(req, res);
-    } else if (req.method === "POST" && !sessionId) {
+    } else if (sessionId) {
+      // Session ID we don't recognise — the server restarted, or we reaped it.
+      //
+      // This MUST be 404, not 400. The Streamable HTTP spec says a client that
+      // gets 404 for its session ID starts a fresh session with a new
+      // initialize; a 400 is instead read as a fatal protocol error, so the
+      // client gives up and the connector goes dark with zero tools loaded
+      // until someone reconnects it by hand. That was the "connection dropped
+      // unexpectedly / no NationBuilder tools" report.
+      console.error(`Unknown session ${sessionId} — telling client to re-initialize`);
+      res.status(404).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32001,
+          message: "Session not found or expired. Start a new session with an initialize request.",
+        },
+        id: null,
+      });
+    } else if (req.method === "POST") {
       // New session — first POST has no session ID (the initialize request)
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -197,25 +240,21 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
       if (transport.sessionId) {
         console.error(`New Streamable HTTP session: ${transport.sessionId}`);
         streamableTransports.set(transport.sessionId, transport);
+        sessionLastSeen.set(transport.sessionId, Date.now());
 
         transport.onclose = () => {
           console.error(`Streamable HTTP session closed: ${transport.sessionId}`);
           if (transport.sessionId) {
             streamableTransports.delete(transport.sessionId);
+            sessionLastSeen.delete(transport.sessionId);
           }
         };
       }
-    } else if (req.method === "DELETE" && sessionId) {
-      // Session cleanup
-      const transport = streamableTransports.get(sessionId);
-      if (transport) {
-        await transport.handleRequest(req, res);
-        streamableTransports.delete(sessionId);
-      } else {
-        res.status(404).json({ error: "Session not found" });
-      }
     } else {
-      res.status(400).json({ error: "Invalid or missing session ID" });
+      // GET or DELETE with no session ID at all — nothing to attach to.
+      // (DELETE for a live session is handled by the transport above, which
+      // terminates it and fires onclose.)
+      res.status(400).json({ error: "Missing Mcp-Session-Id header" });
     }
   });
 
@@ -264,6 +303,15 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     console.error(`Health check: http://localhost:${port}/health`);
     if (isOAuthConfigured()) {
       console.error(`OAuth: http://localhost:${port}/oauth/authorize`);
+    }
+
+    // Verify our stored credentials right away rather than letting the first
+    // user discover they're dead. Deliberately not awaited — the server should
+    // come up and answer health checks even if NationBuilder is slow.
+    if (isOAuthConfigured()) {
+      bootstrapToken().catch((err) =>
+        console.error("Startup token bootstrap error:", err)
+      );
     }
   });
 }

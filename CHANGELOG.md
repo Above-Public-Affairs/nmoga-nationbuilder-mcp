@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-08-10]
+
+### Fixed
+- **Connector no longer goes dark after a session is lost.** A request carrying a session ID the server didn't recognise (after a restart, or once a session was reaped) got `400 Invalid or missing session ID`. The MCP Streamable HTTP spec reserves `404` for that case — it's the client's cue to start a fresh session with a new `initialize`. A `400` reads as a fatal protocol error instead, so the client stopped trying and the connector showed as unreachable with **zero tools loaded** until someone reconnected it by hand. Unknown sessions now return `404` with a JSON-RPC error body, and clients recover on their own.
+- **OAuth token persistence to Railway was failing silently every day.** The deploy log had been showing `Railway variable update error: Not Authorized` on every refresh since at least 2026-08-02, while the in-memory refresh succeeded. Because NationBuilder rotates the refresh token on each refresh, `NATIONBUILDER_REFRESH_TOKEN` in Railway env had been stale for months — so the next restart would have hydrated a dead token and left the connector with no NationBuilder access until a human re-ran `/oauth/authorize`. Persistence now tries both Railway credential styles (`Authorization: Bearer` for account/workspace tokens, `Project-Access-Token` for project tokens — sending a project token as a Bearer is exactly what produces "Not Authorized"), and a failure is logged as CRITICAL and reported to the Error Reporter instead of passing as one quiet line.
+- **Session map no longer grows without bound.** Every `initialize` built a fresh `McpServer` with all tools and stored the transport in a `Map` that was only cleaned on `onclose` — which Claude's connector never triggers, since it doesn't send `DELETE`. Memory drifted 0.342 → 0.397 GB over a week. Sessions idle for 30 minutes are now closed and evicted, and `DELETE` cleanup runs through the transport so `onclose` clears both maps.
+
+### Added
+- Startup token check (`bootstrapToken`). Hydrating from env left `expiresAt` null, which made the periodic refresh a no-op — nothing touched the token until a user's first tool call took a 401. The server now exercises the refresh token at boot, so a restart either re-establishes the rotation chain (and re-persists it) or surfaces a dead token in the deploy logs immediately, rather than as a broken connector for whoever tries first.
+
 ## [2026-04-28]
 
 ### Fixed
