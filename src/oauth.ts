@@ -2,14 +2,27 @@
  * OAuth 2.0 flow for NationBuilder
  *
  * Adds /oauth/authorize and /oauth/callback routes.
- * Persists tokens to Railway env var (NATIONBUILDER_ACCESS_TOKEN) so they survive restarts.
- * Falls back to NATIONBUILDER_ACCESS_TOKEN env var on startup.
+ * Persists tokens to a JSON file on the Railway volume so they survive restarts,
+ * falling back to the NATIONBUILDER_ACCESS_TOKEN / NATIONBUILDER_REFRESH_TOKEN
+ * env vars when no token file exists yet (first boot after this change, and
+ * local stdio use).
+ *
+ * NationBuilder rotates the refresh token on every refresh, so whatever we
+ * persist is the *only* way back after a restart — if the write fails, the next
+ * restart leaves the connector with no NationBuilder access until a human
+ * re-runs /oauth/authorize. This previously wrote back to Railway env vars via
+ * the platform API, which required a privileged RAILWAY_API_TOKEN inside the
+ * container and failed silently for months. A file on a mounted volume needs no
+ * credentials and no network call.
  *
  * Security: CSRF state parameter, PKCE (S256), HTML output escaping.
+ * The token file holds live credentials, so it's written 0600.
  */
 
 import { Router } from "express";
 import { randomBytes, createHash } from "crypto";
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from "fs";
+import { dirname, join } from "path";
 import { reportError, reportErrorThrottled, resetThrottle, safeErr } from "./utils/errorReporter.js";
 
 interface TokenData {
@@ -74,95 +87,79 @@ function oauthErrorCode(body: string): string | null {
 }
 
 /**
- * Persist the access + refresh tokens to Railway env vars so they survive restarts.
- *
- * NationBuilder rotates the refresh token on every refresh, so if this write
- * fails the copy in Railway's env goes stale immediately — and the next restart
- * hydrates a dead refresh token, which can't be recovered from without a human
- * re-running /oauth/authorize. That makes a silent failure here far more
- * expensive than it looks, so failures are logged loudly and reported.
- *
- * Railway accepts two different credential styles and they are NOT
- * interchangeable: account/workspace tokens go in `Authorization: Bearer`,
- * project tokens go in the `Project-Access-Token` header. Sending a project
- * token as a Bearer yields "Not Authorized", so try both before giving up.
+ * Where the token file lives. TOKEN_STORE_PATH overrides; otherwise it sits on
+ * the Railway volume mount. Nothing outside the volume survives a restart, so a
+ * wrong path here silently reintroduces the exact bug this replaced.
  */
-async function persistTokenToRailway(accessToken: string, refreshToken?: string | null): Promise<boolean> {
-  const railwayToken = process.env.RAILWAY_API_TOKEN;
-  const projectId = process.env.RAILWAY_PROJECT_ID;
-  const environmentId = process.env.RAILWAY_ENVIRONMENT_ID;
-  const serviceId = process.env.RAILWAY_SERVICE_ID;
+function getTokenStorePath(): string {
+  if (process.env.TOKEN_STORE_PATH) return process.env.TOKEN_STORE_PATH;
+  const mount = process.env.RAILWAY_VOLUME_MOUNT_PATH;
+  return mount ? join(mount, "nb-tokens.json") : "";
+}
 
-  if (!railwayToken || !projectId || !environmentId || !serviceId) {
+/** Persist tokens to the volume. Returns true only if the bytes actually landed. */
+function persistTokens(data: TokenData): boolean {
+  const path = getTokenStorePath();
+
+  if (!path) {
     console.error(
-      "Token persistence skipped — missing Railway config. " +
-      "Tokens will be lost on restart and someone will have to re-run /oauth/authorize."
+      "CRITICAL: no token store path (RAILWAY_VOLUME_MOUNT_PATH unset and no " +
+      "TOKEN_STORE_PATH). Tokens are in memory only — the next restart will " +
+      "leave this connector with no NationBuilder access until someone re-runs " +
+      "/oauth/authorize. Mount a volume on this service."
     );
+    reportError({
+      category: "auth_error",
+      message: "NationBuilder token persistence unavailable — no volume mounted",
+    });
     return false;
   }
 
-  const mutation = `
-    mutation UpsertVariables($input: VariableCollectionUpsertInput!) {
-      variableCollectionUpsert(input: $input)
-    }
-  `;
-
-  const body = JSON.stringify({
-    query: mutation,
-    variables: {
-      input: {
-        projectId,
-        environmentId,
-        serviceId,
-        variables: {
-          NATIONBUILDER_ACCESS_TOKEN: accessToken,
-          ...(refreshToken ? { NATIONBUILDER_REFRESH_TOKEN: refreshToken } : {}),
-        },
-      },
-    },
-  });
-
-  const authStyles: { label: string; headers: Record<string, string> }[] = [
-    { label: "account token", headers: { Authorization: `Bearer ${railwayToken}` } },
-    { label: "project token", headers: { "Project-Access-Token": railwayToken } },
-  ];
-
-  const failures: string[] = [];
-
-  for (const style of authStyles) {
-    try {
-      const response = await fetch("https://backboard.railway.app/graphql/v2", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...style.headers },
-        body,
-      });
-
-      const data = (await response.json()) as { errors?: { message: string }[] };
-
-      if (!data.errors?.length && response.ok) {
-        console.error(`OAuth token persisted to Railway env vars (via ${style.label})`);
-        return true;
-      }
-
-      failures.push(`${style.label}: ${data.errors?.[0]?.message ?? `HTTP ${response.status}`}`);
-    } catch (err) {
-      failures.push(`${style.label}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    // Write-then-rename so a crash mid-write can't leave a truncated file that
+    // reads back as corrupt on the next boot.
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    renameSync(tmp, path);
+    console.error(`OAuth tokens persisted to ${path}`);
+    return true;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(
+      `CRITICAL: could not write tokens to ${path} (${detail}). This service ` +
+      `will lose NationBuilder access on its next restart until someone ` +
+      `re-runs /oauth/authorize.`
+    );
+    reportError({
+      category: "auth_error",
+      message: `NationBuilder token persistence failed: ${detail}`,
+      context: { path },
+    });
+    return false;
   }
+}
 
-  const detail = failures.join(" | ");
-  console.error(
-    `CRITICAL: could not persist NationBuilder tokens to Railway (${detail}). ` +
-    `The refresh token in Railway env is now STALE — this service will lose ` +
-    `NationBuilder access on its next restart until someone re-runs /oauth/authorize. ` +
-    `Fix RAILWAY_API_TOKEN (needs write access to this service's variables).`
-  );
-  reportError({
-    category: "auth_error",
-    message: `NationBuilder token persistence to Railway failed: ${detail}`,
-    context: { projectId, serviceId },
-  });
-  return false;
+/** Read persisted tokens from the volume, or null if absent/unreadable. */
+function loadPersistedTokens(): TokenData | null {
+  const path = getTokenStorePath();
+  if (!path) return null;
+
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<TokenData>;
+    if (!parsed.accessToken) return null;
+    return {
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken ?? null,
+      expiresAt: parsed.expiresAt ?? null,
+    };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      console.error(`Could not read token store at ${path}: ${String(err)}`);
+    }
+    return null;
+  }
 }
 
 function getConfig() {
@@ -178,19 +175,38 @@ function getConfig() {
   return { slug, clientId, clientSecret, callbackUrl };
 }
 
-/** Hydrate in-memory tokenData from env vars on startup (so refresh works after restarts) */
+/**
+ * Hydrate in-memory tokenData on startup.
+ *
+ * The volume is the source of truth; env vars are only a fallback for the first
+ * boot after a fresh authorize (and for local stdio use). Preferring the file
+ * matters because the env copy is frozen at whatever was last written there —
+ * trusting it over a newer file would hand back an already-rotated token.
+ */
 export function initTokenFromEnv(): void {
+  if (tokenData) return;
+
+  const persisted = loadPersistedTokens();
+  if (persisted) {
+    tokenData = persisted;
+    console.error(
+      `Loaded tokens from ${getTokenStorePath()} ` +
+      `(refresh token: ${persisted.refreshToken ? "yes" : "no"})`
+    );
+    return;
+  }
+
   const accessToken = process.env.NATIONBUILDER_ACCESS_TOKEN;
   const refreshToken = process.env.NATIONBUILDER_REFRESH_TOKEN;
 
-  if (accessToken && !tokenData) {
+  if (accessToken) {
     tokenData = {
       accessToken,
       refreshToken: refreshToken ?? null,
-      expiresAt: null, // unknown — will refresh on first 401
+      expiresAt: null, // unknown — startup refresh will establish it
     };
     console.error(
-      `Loaded token from env vars (refresh token: ${refreshToken ? "yes" : "no"})`
+      `No token file yet — loaded token from env vars (refresh token: ${refreshToken ? "yes" : "no"})`
     );
   }
 }
@@ -311,6 +327,7 @@ async function doRefresh(): Promise<boolean> {
 
     tokenData = {
       accessToken: data.access_token,
+      // NB doesn't always return a new refresh token; keep the current one when it doesn't.
       refreshToken: data.refresh_token ?? tokenData.refreshToken,
       expiresAt: data.expires_in
         ? Date.now() + data.expires_in * 1000
@@ -325,7 +342,7 @@ async function doRefresh(): Promise<boolean> {
       refreshHealthy = true;
       resetThrottle(REFRESH_THROTTLE_KEY);
     }
-    persistTokenToRailway(data.access_token, data.refresh_token ?? tokenData.refreshToken).catch(() => {});
+    persistTokens(tokenData);
     return true;
   } catch (error) {
     // A SyntaxError parsing a 200 response quotes the offending body in its
@@ -543,12 +560,21 @@ export function createOAuthRouter(): Router {
           : null,
       };
 
-      // Persist to Railway env vars so tokens survive restarts
-      persistTokenToRailway(data.access_token, data.refresh_token).catch(() => {});
+      // Persist to the volume so tokens survive restarts
+      const persisted = persistTokens(tokenData);
 
       const expiryInfo = data.expires_in
         ? `Token expires in ${Math.round(data.expires_in / 3600)} hours (auto-refresh enabled).`
         : "Token does not expire.";
+
+      // Say so on the page rather than only in the logs — whoever just clicked
+      // through is the one person positioned to fix a bad volume mount, and
+      // otherwise they'd only find out at the next restart.
+      const persistenceNote = persisted
+        ? `<p style="color:#666;font-size:14px">Tokens saved to persistent storage — they will survive restarts.</p>`
+        : `<p style="color:#b00;font-size:14px"><strong>Warning:</strong> tokens could NOT be saved to persistent storage. ` +
+          `They are in memory only, so the next restart will require re-authorizing here again. ` +
+          `Check that a volume is mounted on this service (see the deploy logs for details).</p>`;
 
       console.error(
         `OAuth token obtained. Type: ${data.token_type}, Scope: ${data.scope ?? "default"}, Refresh: ${data.refresh_token ? "yes" : "no"}`
@@ -559,6 +585,7 @@ export function createOAuthRouter(): Router {
           <h2>Authorization Successful</h2>
           <p>NationBuilder OAuth token obtained.</p>
           <p style="color:#666;font-size:14px">${expiryInfo}</p>
+          ${persistenceNote}
           <p style="color:#666;font-size:14px">You can close this window. The MCP server is now using your OAuth credentials.</p>
         </body></html>
       `);

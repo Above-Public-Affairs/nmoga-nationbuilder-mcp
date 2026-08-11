@@ -78,9 +78,27 @@ npm run build
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `NATIONBUILDER_SLUG` | Yes | Your NationBuilder nation slug |
-| `NATIONBUILDER_ACCESS_TOKEN` | Yes | API test token from NB Settings |
+| `NATIONBUILDER_ACCESS_TOKEN` | Yes | API test token from NB Settings. In OAuth mode this is only a first-boot fallback — the token file on the volume takes precedence once it exists. |
+| `NATIONBUILDER_CLIENT_ID` / `NATIONBUILDER_CLIENT_SECRET` | OAuth only | Enables the `/oauth/*` routes |
+| `NATIONBUILDER_REFRESH_TOKEN` | No | First-boot fallback only, same as the access token above |
+| `TOKEN_STORE_PATH` | No | Overrides where tokens are persisted. Defaults to `$RAILWAY_VOLUME_MOUNT_PATH/nb-tokens.json`. |
 | `PORT` | No | HTTP port for SSE mode (Railway sets automatically) |
-| `MCP_AUTH_TOKEN` | No | Bearer token to protect SSE endpoint |
+| `MCP_AUTH_TOKEN` | No | Currently **unused** — the `/mcp` endpoint is not gated. Present in the Railway env but not read by the code. |
+
+### Token persistence (OAuth mode) — requires a volume
+
+NationBuilder rotates the refresh token on every refresh, so the persisted copy
+is the only way back after a restart. This service writes tokens to
+`$RAILWAY_VOLUME_MOUNT_PATH/nb-tokens.json` (mode `0600`, written via a temp
+file + rename so a crash can't truncate it).
+
+**A volume must be mounted or tokens live in memory only** — the service will
+come up, work fine, and then lose NationBuilder access on its next restart until
+someone re-runs `/oauth/authorize`. The production service has a volume at
+`/data`. If persistence isn't working you'll see a `CRITICAL:` line in the deploy
+logs, and the `/oauth/callback` success page says so explicitly.
+
+Check current auth state any time at `/oauth/status`.
 
 ## Development
 
