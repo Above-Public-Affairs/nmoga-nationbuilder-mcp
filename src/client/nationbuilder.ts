@@ -12,7 +12,7 @@ import type {
   QueryParams,
 } from "../types/index.js";
 import { RateLimiter } from "../utils/rateLimiter.js";
-import { reportError } from "../utils/errorReporter.js";
+import { reportError, reportErrorThrottled } from "../utils/errorReporter.js";
 import { forceRefreshToken } from "../oauth.js";
 
 export interface NationBuilderClient {
@@ -87,6 +87,20 @@ export function createNationBuilderClient(
     return qs ? `?${qs}` : "";
   }
 
+  /**
+   * Path only, numeric IDs collapsed, query string dropped — safe to put in a
+   * report's context. NationBuilder query strings carry filter values
+   * (filter[email]=..., filter[first_name]=...), which are member PII and
+   * must never leave the process in a report.
+   */
+  function safePath(url: string): string {
+    try {
+      return new URL(url).pathname.replace(/\/\d+(?=\/|$)/g, "/:id");
+    } catch {
+      return "unknown";
+    }
+  }
+
   function formatApiErrors(errorResponse: JsonApiErrorResponse): string {
     return errorResponse.errors
       .map((e) => {
@@ -107,8 +121,17 @@ export function createNationBuilderClient(
     await rateLimiter.acquire();
 
     let lastError: Error | null = null;
+    // Separate from lastError: the 429 and 5xx `continue` paths below never
+    // throw, so they never reach the catch that sets lastError. Without this,
+    // the final report loses the actual status and falls back to a generic
+    // "Request failed after retries" with no rawError — the exact failure
+    // mode this tracks around.
+    let lastStatus: number | null = null;
+    let noToken = false;
+    let attemptsMade = 0;
 
     for (let attempt = 0; attempt < retryLimit; attempt++) {
+      attemptsMade++;
       try {
         const fetchOptions: RequestInit = {
           method,
@@ -129,7 +152,12 @@ export function createNationBuilderClient(
             console.error("Token refreshed, retrying request...");
             continue; // retry with new token (buildHeaders() will pick it up)
           }
-          // Refresh failed — fall through to throw
+          // Refresh failed — fall through to throw. Deliberately not setting
+          // lastStatus on a *successful* refresh+retry above (the `continue`
+          // case): if attempt 0 was a 401 that recovered and attempt 1 then
+          // hits a 500, the final report should reflect the 500, not a stale
+          // 401 that already resolved itself.
+          lastStatus = 401;
           const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
           const authorizeUrl = domain
             ? `https://${domain}/oauth/authorize`
@@ -139,6 +167,7 @@ export function createNationBuilderClient(
             `Re-authorize here: ${authorizeUrl}`
           );
         } else if (response.status === 401) {
+          lastStatus = 401;
           const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
           const authorizeUrl = domain
             ? `https://${domain}/oauth/authorize`
@@ -151,12 +180,14 @@ export function createNationBuilderClient(
 
         // Handle rate limiting
         if (response.status === 429) {
+          lastStatus = 429;
           await rateLimiter.handleError(429);
           continue;
         }
 
         // Handle server errors with retry
         if (response.status >= 500) {
+          lastStatus = response.status;
           const waitMs = Math.min(1000 * Math.pow(2, attempt), 10000);
           console.error(
             `Server error ${response.status}, retrying in ${waitMs}ms...`
@@ -175,9 +206,13 @@ export function createNationBuilderClient(
         const responseText = await response.text();
 
         if (!contentType.includes("json")) {
+          lastStatus = response.status;
           const preview = responseText.substring(0, 200).replace(/\s+/g, " ").trim();
+          // Path only, not the full URL — the query string carries filter
+          // values (filter[email]=..., filter[first_name]=...), which are
+          // member PII and this message can end up in a reported error.
           throw new Error(
-            `NationBuilder API error: HTTP ${response.status} returned non-JSON (${contentType}). URL: ${url}. Preview: ${preview}`
+            `NationBuilder API error: HTTP ${response.status} returned non-JSON (${contentType}). Path: ${safePath(url)}. Preview: ${preview}`
           );
         }
 
@@ -185,6 +220,7 @@ export function createNationBuilderClient(
         try {
           data = JSON.parse(responseText);
         } catch {
+          lastStatus = response.status;
           throw new Error(
             `NationBuilder API error: HTTP ${response.status} invalid JSON. Preview: ${responseText.substring(0, 200)}`
           );
@@ -192,6 +228,7 @@ export function createNationBuilderClient(
 
         // Check for JSON:API error responses
         if (!response.ok) {
+          lastStatus = response.status;
           if (data && typeof data === "object" && "errors" in data) {
             throw new Error(
               `NationBuilder API error (${response.status}): ${formatApiErrors(data as JsonApiErrorResponse)}`
@@ -205,6 +242,13 @@ export function createNationBuilderClient(
         return data as R;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
+        // A missing token will not fix itself on retry — stop immediately
+        // instead of burning the remaining attempts (and duplicating this
+        // report up to `retryLimit` times).
+        if (lastError.message.startsWith("No access token available")) {
+          noToken = true;
+          break;
+        }
         if (attempt < retryLimit - 1 && !lastError.message.includes("NationBuilder API error")) {
           console.error(
             `Request failed (attempt ${attempt + 1}/${retryLimit}): ${lastError.message}`
@@ -215,12 +259,56 @@ export function createNationBuilderClient(
       }
     }
 
-    reportError({
-      category: "api_error",
-      message: lastError?.message || "Request failed after retries",
-      rawError: lastError,
-      context: { method, url },
-    });
+    const path = safePath(url);
+
+    if (noToken) {
+      reportErrorThrottled({
+        category: "auth_error",
+        message: "nationbuilder_client: no access token available",
+        context: { method, path },
+        throttleKey: "nb_no_token",
+        throttleMs: 60 * 60 * 1000,
+      });
+    } else if (lastStatus === 401) {
+      reportErrorThrottled({
+        category: "auth_error",
+        message: "nationbuilder_client: still 401 after token refresh",
+        context: { method, path, attempts: attemptsMade },
+        throttleKey: "nb_401_unrecovered",
+        throttleMs: 60 * 60 * 1000,
+      });
+    } else if (lastStatus === 429) {
+      reportErrorThrottled({
+        category: "rate_limit",
+        message: "nationbuilder_client: rate limited after retries",
+        context: { method, path, attempts: attemptsMade },
+        throttleKey: "nb_429",
+        throttleMs: 60 * 60 * 1000,
+      });
+    } else if (lastStatus !== null && lastStatus >= 500) {
+      reportErrorThrottled({
+        category: "api_error",
+        message: `nationbuilder_client: HTTP ${lastStatus} after ${attemptsMade} attempts`,
+        rawError: lastError,
+        context: { method, path, status: lastStatus, attempts: attemptsMade },
+        throttleKey: "nb_5xx",
+        throttleMs: 30 * 60 * 1000,
+      });
+    } else if (lastStatus !== null) {
+      // A per-request fault (404/422/malformed body/...) tied to one user
+      // action. The tool layer already reports a `tool_error` for this same
+      // event, so reporting it here too would double every "person not
+      // found" typo — deliberately not reported.
+    } else {
+      // No response reached us at all (network failure, DNS, etc.) — the one
+      // case with no HTTP status to classify by.
+      reportError({
+        category: "api_error",
+        message: `nationbuilder_client: ${method} failed with no response after ${attemptsMade} attempts`,
+        rawError: lastError,
+        context: { method, path, attempts: attemptsMade },
+      });
+    }
 
     throw lastError || new Error("Request failed after retries");
   }

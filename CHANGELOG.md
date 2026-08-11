@@ -10,6 +10,16 @@
 ### Added
 - Startup token check (`bootstrapToken`). Hydrating from env left `expiresAt` null, which made the periodic refresh a no-op — nothing touched the token until a user's first tool call took a 401. The server now exercises the refresh token at boot, so a restart either re-establishes the rotation chain (and re-persists it) or surfaces a dead token in the deploy logs immediately, rather than as a broken connector for whoever tries first.
 
+### Fixed (error reporting rollout)
+- **A single bad `/mcp`, `/sse`, or `/messages` request could crash the whole server for every connected user.** Express 4 doesn't catch async rejections, so one rejected `await` in any of the three routes reached `unhandledRejection` and exited the process. All three now catch and either return a scoped `500` or close the stream — guarded on `res.headersSent`, since the SDK's `/messages` handler already writes a `500` and ends the response before throwing, and an unguarded second `res.status(500)` there would itself crash the process from inside the catch.
+- The API client's retry loop lost the real HTTP status whenever a request exhausted all 3 attempts via a 429 or 5xx `continue` path (which never throws), so the eventual report said only `"Request failed after retries"` with no status and no body. Status and attempt count are now tracked through the loop and carried into the report regardless of which path exhausted the retries.
+- A missing access token retried up to 3 times and could report up to 3 times per call — it now fails fast on the first attempt, since a missing token won't fix itself on retry.
+
+### Added (error reporting rollout)
+- Error reporting now covers every layer, not just the 46 tool/client call sites that already existed: process-level `uncaughtException` / `unhandledRejection` / startup failure now flush a report (bounded to 1.5s) before exiting instead of dropping it in the fire-and-forget POST that a bare `process.exit()` would have thrown away; the three Express routes; the remaining OAuth failure paths (refresh rejection, token exchange, callback CSRF/code validation); and API-client retry exhaustion, now classified by status (`auth_error` / `rate_limit` / `api_error`) instead of one catch-all `api_error`.
+- Auth-failure and public-endpoint reports are throttled (1h windows by default, 24h+ backstop via a healthy→broken transition bypass) so a revoked refresh token — which the client force-refreshes on every 401 — can't flood the digest with one row per tool call.
+- Centralized secret/PII hygiene: OAuth token-endpoint response bodies, query strings, and raw `params` objects are never passed through to a report — only a bounded OAuth2 error code, HTTP status, path shape (query string stripped), and which filter keys were set (not their values). `search_people`/`advanced_search` error context no longer includes the raw `params` object, which could carry a member's email, name, or note text.
+
 ## [2026-04-28]
 
 ### Fixed
