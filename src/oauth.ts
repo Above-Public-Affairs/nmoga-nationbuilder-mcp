@@ -21,7 +21,7 @@
 
 import { Router } from "express";
 import { randomBytes, createHash } from "crypto";
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { reportError, reportErrorThrottled, resetThrottle, safeErr } from "./utils/errorReporter.js";
 
@@ -137,6 +137,30 @@ function persistTokens(data: TokenData): boolean {
       context: { path },
     });
     return false;
+  }
+}
+
+/**
+ * Report where tokens will be written and whether that location actually works,
+ * by probing it rather than assuming. Exposed on /oauth/status and logged at
+ * boot so a missing volume is visible immediately — otherwise the only signal
+ * is a failed write during authorize, which is far too late: by then someone
+ * has already re-authorized and will silently lose it on the next restart.
+ */
+export function getTokenStoreStatus(): { path: string | null; writable: boolean; reason?: string } {
+  const path = getTokenStorePath();
+  if (!path) {
+    return { path: null, writable: false, reason: "no RAILWAY_VOLUME_MOUNT_PATH or TOKEN_STORE_PATH — is a volume mounted?" };
+  }
+
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const probe = `${path}.probe`;
+    writeFileSync(probe, "", { mode: 0o600 });
+    unlinkSync(probe);
+    return { path, writable: true };
+  } catch (err) {
+    return { path, writable: false, reason: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -628,6 +652,9 @@ export function createOAuthRouter(): Router {
         ? new Date(tokenData.expiresAt).toISOString()
         : null,
       hasRefreshToken: !!tokenData?.refreshToken,
+      // Check this BEFORE authorizing: if writable is false, the token you're
+      // about to obtain won't survive the next restart.
+      tokenStore: getTokenStoreStatus(),
     });
   });
 

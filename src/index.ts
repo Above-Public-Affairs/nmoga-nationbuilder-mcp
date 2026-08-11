@@ -19,7 +19,7 @@ import { randomUUID } from "crypto";
 import type { Server } from "node:http";
 import express from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
-import { bootstrapToken, createOAuthRouter, getOAuthToken, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
+import { bootstrapToken, createOAuthRouter, getOAuthToken, getTokenStoreStatus, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
 import { reportError, reportErrorThrottled, reportAndFlush, safeErr } from "./utils/errorReporter.js";
 import { registerSignupTools } from "./tools/signups.js";
 import { registerTagTools } from "./tools/tags.js";
@@ -389,6 +389,21 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     console.error(`Health check: http://localhost:${port}/health`);
     if (isOAuthConfigured()) {
       console.error(`OAuth: http://localhost:${port}/oauth/authorize`);
+    }
+
+    // State the persistence situation at boot. A missing volume otherwise only
+    // shows up as a failed write during authorize — after someone has already
+    // re-authorized and is about to lose it on the next restart.
+    if (isOAuthConfigured()) {
+      const store = getTokenStoreStatus();
+      if (store.writable) {
+        console.error(`Token store: ${store.path} (writable — tokens will survive restarts)`);
+      } else {
+        console.error(
+          `CRITICAL: token store not writable (${store.reason}). Tokens will be ` +
+          `in memory only and every restart will require re-running /oauth/authorize.`
+        );
+      }
     }
 
     // Verify our stored credentials right away rather than letting the first
