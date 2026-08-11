@@ -29,5 +29,6 @@
 - [ ] Configure Claude Desktop with mcp-remote connection
 - [ ] Test all 17 tools end-to-end against live NationBuilder
 - [x] Add error reporting (error-reporter.ts) — 2026-08-11: full coverage (process/exit paths, all three Express routes, remaining OAuth paths, client retry diagnostics) with throttling and PII/secret scrubbing; see CHANGELOG.md
+- [x] Org filter fix (2026-08-10): `search_people`'s `is_organization` param was sending `filter[is_organization]`, an attribute that doesn't exist in V2 — every call 400'd. Now maps to `filter[signup_type]` (0=person, 1=organization, confirmed against the nation's own OpenAPI spec); `advanced_search` and the MCP instructions corrected to match; `signup_type` added to default sparse fields so orgs render a `Type: Organization` line. See CHANGELOG.md.
 - [ ] Update CLAUDE.md Active Projects table
 - [ ] Update PROJECTS-STATUS.md
