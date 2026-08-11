@@ -80,6 +80,8 @@ export interface SignupAttributes {
   phone: string | null;
   mobile: string | null;
   support_level: number | null;
+  /** 0 = person, 1 = organization. NB V2 has no `is_organization` attribute. */
+  signup_type: number | null;
   is_volunteer: boolean | null;
   is_donor: boolean | null;
   registered_address_address1: string | null;

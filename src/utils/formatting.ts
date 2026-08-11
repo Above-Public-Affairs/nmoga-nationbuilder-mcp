@@ -36,6 +36,8 @@ export function formatSignup(resource: JsonApiResource<SignupAttributes>): strin
 
   lines.push(`**${a.full_name || [a.first_name, a.last_name].filter(Boolean).join(" ") || "Unknown"}** (ID: ${resource.id})`);
 
+  if (a.signup_type === 1) lines.push(`  Type: Organization`);
+
   if (a.email) lines.push(`  Email: ${a.email}`);
   if (a.phone) lines.push(`  Phone: ${a.phone}`);
   if (a.mobile) lines.push(`  Mobile: ${a.mobile}`);

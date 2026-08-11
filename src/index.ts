@@ -48,7 +48,9 @@ const INSTRUCTIONS = `
 ## Key Concepts
 
 ### People vs Organizations
-NationBuilder stores both people and organizations as "signups" in the same endpoint. Organizations have is_organization: true. When searching, use the search_people tool for both — there is no separate organizations endpoint.
+NationBuilder stores both people and organizations as "signups" in the same endpoint. The distinction is the \`signup_type\` attribute: **0 = person, 1 = organization**. There is no \`is_organization\` attribute — filtering on that name returns a 400 from the V2 API.
+
+When searching, use the search_people tool for both — there is no separate organizations endpoint. To scope by type, pass \`is_organization: true\` (or \`false\`) to \`search_people\`, which maps to \`filter[signup_type]\` for you. In \`advanced_search\`, filter on the raw attribute instead: \`filters={"signup_type":"1"}\`.
 
 ### Relationships (IMPORTANT)
 There are two completely different systems that can associate people with organizations:

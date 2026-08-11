@@ -52,7 +52,7 @@ export function registerSignupTools(
       is_organization: z
         .boolean()
         .optional()
-        .describe("Filter to organizations only (true) or people only (false)"),
+        .describe("Filter to organizations only (true) or people only (false). Maps to NationBuilder's `signup_type` attribute (0 = person, 1 = organization)."),
       note_contains: z
         .string()
         .optional()
@@ -113,7 +113,7 @@ export function registerSignupTools(
           page_number: params.page_number,
           fields: {
             signups:
-              "first_name,last_name,full_name,email,phone,mobile,support_level,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,custom_values,created_at,updated_at",
+              "first_name,last_name,full_name,email,phone,mobile,support_level,signup_type,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,custom_values,created_at,updated_at",
           },
         };
 
@@ -146,7 +146,9 @@ export function registerSignupTools(
         }
 
         if (params.is_organization != null) {
-          filter.is_organization = String(params.is_organization);
+          // NB V2 has no `is_organization` attribute — the person/organization
+          // distinction lives on `signup_type` (0 = person, 1 = organization).
+          filter.signup_type = params.is_organization ? "1" : "0";
         }
 
         if (params.note_contains) {
@@ -397,7 +399,7 @@ export function registerSignupTools(
 
   server.tool(
     "advanced_search",
-    "Power-user search with full NationBuilder V2 filter syntax. Pass filters as key-value pairs where values can be strings (exact match) or objects with operators (match, gte, lte, gt, lt, not_eq, prefix, suffix). Example: filters={\"support_level\":{\"gte\":\"1\",\"lte\":\"3\"}, \"note\":{\"match\":\"volunteer\"}}. Use the top-level `tag` parameter for tag filtering — the V2 signups endpoint has no tag attribute, so passing `tags` / `tag_list` / etc. inside `filters` will either error or be silently ignored.",
+    "Power-user search with full NationBuilder V2 filter syntax. Pass filters as key-value pairs where values can be strings (exact match) or objects with operators (match, gte, lte, gt, lt, not_eq, prefix, suffix). Example: filters={\"support_level\":{\"gte\":\"1\",\"lte\":\"3\"}, \"note\":{\"match\":\"volunteer\"}}. Use the top-level `tag` parameter for tag filtering — the V2 signups endpoint has no tag attribute, so passing `tags` / `tag_list` / etc. inside `filters` will either error or be silently ignored. To filter people vs organizations use `signup_type` (0 = person, 1 = organization); there is no `is_organization` attribute.",
     {
       filters: z
         .record(z.string(), z.union([z.string(), z.record(z.string(), z.string())]))
@@ -496,7 +498,7 @@ export function registerSignupTools(
         } else {
           queryParams.fields = {
             signups:
-              "first_name,last_name,full_name,email,phone,mobile,support_level,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,custom_values,created_at,updated_at",
+              "first_name,last_name,full_name,email,phone,mobile,support_level,signup_type,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,custom_values,created_at,updated_at",
           };
         }
 
