@@ -2,7 +2,12 @@
 
 ## Current Status
 
-**Phase:** Development complete, ready for Railway deployment and testing
+**Phase:** Deployed and in production use as an org Connector.
+
+Live at `https://nmoga-nationbuilder-mcp-production.up.railway.app/mcp` (Streamable HTTP;
+legacy `/sse` retained for older clients). Auth is OAuth against the `nmoga` nation, with
+tokens persisted to a Railway volume at `/data`. Check `/oauth/status` for current auth and
+token-store state; `/health` for liveness.
 
 ## Completed
 
@@ -24,9 +29,10 @@
 
 ## To-Do
 
-- [ ] Deploy to Railway
-- [ ] Set Railway env vars (NATIONBUILDER_SLUG, NATIONBUILDER_ACCESS_TOKEN, MCP_AUTH_TOKEN)
-- [ ] Configure Claude Desktop with mcp-remote connection
+- [x] Deploy to Railway — done long ago; this list was stale
+- [x] Set Railway env vars — done. `RAILWAY_API_TOKEN` is now **unused** (persistence moved to the volume) and can be deleted. `MCP_AUTH_TOKEN` is set but **not read by the code** — `/mcp` is currently ungated; wiring it up would break the org Connector unless Claude is configured to send it.
+- [x] Configure Claude Desktop — in use as an org Connector
+- [x] Token persistence proven across a restart (2026-08-11) — volume at `/data`, verified by restarting the service and watching it come back authenticated with no human action
 - [ ] Test all 17 tools end-to-end against live NationBuilder
 - [x] Add error reporting (error-reporter.ts) — 2026-08-11: full coverage (process/exit paths, all three Express routes, remaining OAuth paths, client retry diagnostics) with throttling and PII/secret scrubbing; see CHANGELOG.md
 - [x] Org filter fix (2026-08-10): `search_people`'s `is_organization` param was sending `filter[is_organization]`, an attribute that doesn't exist in V2 — every call 400'd. Now maps to `filter[signup_type]` (0=person, 1=organization, confirmed against the nation's own OpenAPI spec); `advanced_search` and the MCP instructions corrected to match; `signup_type` added to default sparse fields so orgs render a `Type: Organization` line. See CHANGELOG.md.
