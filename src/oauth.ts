@@ -10,7 +10,7 @@
 
 import { Router } from "express";
 import { randomBytes, createHash } from "crypto";
-import { reportError } from "./utils/errorReporter.js";
+import { reportError, reportErrorThrottled, resetThrottle, safeErr } from "./utils/errorReporter.js";
 
 interface TokenData {
   accessToken: string;
@@ -54,6 +54,23 @@ function escapeHtml(str: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/**
+ * Pull the OAuth2 `error` code out of a token-endpoint error body without
+ * ever forwarding the body itself. NationBuilder's error responses can echo
+ * the request params we just sent — client_secret, refresh_token, code,
+ * code_verifier — so the raw body must never reach a log line or a report.
+ * The bounded `error` code (invalid_grant, invalid_client, ...) is the
+ * actual diagnostic and is safe: it's from a small OAuth2-spec vocabulary.
+ */
+function oauthErrorCode(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    return typeof parsed.error === "string" && parsed.error.length <= 64 ? parsed.error : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -221,6 +238,33 @@ export function getOAuthToken(): string | null {
   return tokenData?.accessToken ?? null;
 }
 
+/**
+ * The client force-refreshes on EVERY 401 — and does so twice per failed
+ * request (the retry loop's error-message heuristic doesn't recognize an
+ * auth failure as terminal, so it retries once more before giving up). An
+ * unthrottled report here means one row per tool call for as long as the
+ * refresh token stays revoked. `refreshHealthy` tracks working -> broken so
+ * the first failure after a healthy period always gets through immediately,
+ * even inside an open throttle window from a stale/earlier outage.
+ */
+const REFRESH_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
+const REFRESH_THROTTLE_KEY = "oauth_refresh_failed";
+let refreshHealthy = true;
+
+function reportRefreshFailure(message: string, context: Record<string, unknown>, rawError?: unknown): void {
+  const transition = refreshHealthy;
+  refreshHealthy = false;
+  reportErrorThrottled({
+    category: "auth_error",
+    message,
+    rawError,
+    context: { ...context, first_failure_since_healthy: transition },
+    throttleKey: REFRESH_THROTTLE_KEY,
+    throttleMs: REFRESH_THROTTLE_MS,
+    force: transition,
+  });
+}
+
 /** Internal refresh logic shared by refreshTokenIfNeeded and forceRefreshToken */
 async function doRefresh(): Promise<boolean> {
   if (!tokenData?.refreshToken) return false;
@@ -247,7 +291,15 @@ async function doRefresh(): Promise<boolean> {
 
     if (!response.ok) {
       const text = await response.text();
-      console.error(`Token refresh failed: ${response.status} ${text}`);
+      // Never log or report `text` raw: the request body we just sent
+      // contains client_secret and refresh_token, and NationBuilder's error
+      // response can echo request params back.
+      const code = oauthErrorCode(text);
+      console.error(`Token refresh failed: HTTP ${response.status}${code ? ` (${code})` : ""}`);
+      reportRefreshFailure("oauth_refresh: NationBuilder rejected the refresh token", {
+        http_status: response.status,
+        oauth_error: code,
+      });
       return false;
     }
 
@@ -266,10 +318,24 @@ async function doRefresh(): Promise<boolean> {
     };
 
     console.error("OAuth token refreshed successfully");
+    // Recovery: clear the window so the next breakage alerts immediately
+    // instead of being swallowed by a throttle window left over from before
+    // this fix.
+    if (!refreshHealthy) {
+      refreshHealthy = true;
+      resetThrottle(REFRESH_THROTTLE_KEY);
+    }
     persistTokenToRailway(data.access_token, data.refresh_token ?? tokenData.refreshToken).catch(() => {});
     return true;
   } catch (error) {
-    console.error("Token refresh error:", error);
+    // A SyntaxError parsing a 200 response quotes the offending body in its
+    // message, which can contain the access token — never pass it through
+    // as-is.
+    const safe = error instanceof SyntaxError
+      ? new Error("SyntaxError parsing token response (body withheld)")
+      : error;
+    console.error("Token refresh error:", safeErr(safe));
+    reportRefreshFailure("oauth_refresh: request to NationBuilder failed", { phase: "network_or_parse" }, safe);
     return false;
   }
 }
@@ -336,6 +402,21 @@ export function createOAuthRouter(): Router {
     const state = req.query.state as string | undefined;
 
     if (error) {
+      // A user declining consent is not a defect — don't report that case.
+      // This endpoint is public and unauthenticated, so anything else here
+      // (invalid_client, unauthorized_client, server_error, ...) is worth a
+      // throttled row: an internet scanner hitting it with garbage `error`
+      // values is a flood vector otherwise.
+      const errorCode = /^[a-z_]{1,40}$/.test(error) ? error : "unrecognized";
+      if (errorCode !== "access_denied") {
+        reportErrorThrottled({
+          category: "auth_error",
+          message: `oauth_callback: NationBuilder returned ${errorCode}`,
+          context: { oauth_error: errorCode },
+          throttleKey: `oauth_callback_error:${errorCode}`,
+          throttleMs: 60 * 60 * 1000,
+        });
+      }
       res.status(400).send(`
         <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
           <h2>Authorization Denied</h2>
@@ -347,6 +428,15 @@ export function createOAuthRouter(): Router {
 
     // Verify CSRF state parameter
     if (!state || !pendingAuths.has(state)) {
+      // Never echo `state` itself — treat it as opaque. Public and
+      // unauthenticated endpoint, so throttle this too.
+      reportErrorThrottled({
+        category: "auth_error",
+        message: "oauth_callback: missing or expired CSRF state",
+        context: { state_present: !!state, state_length: state?.length ?? 0, pending_auths: pendingAuths.size },
+        throttleKey: "oauth_callback_bad_state",
+        throttleMs: 60 * 60 * 1000,
+      });
       res.status(400).send(`
         <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
           <h2>Invalid State</h2>
@@ -372,6 +462,14 @@ export function createOAuthRouter(): Router {
 
     // Sanitize code: NB codes should be alphanumeric with possible dashes/underscores
     if (!/^[\w\-\.]+$/.test(code) || code.length > 512) {
+      // `code` is itself a credential — length only, never the value.
+      reportErrorThrottled({
+        category: "auth_error",
+        message: "oauth_callback: malformed authorization code",
+        context: { code_length: code.length },
+        throttleKey: "oauth_callback_bad_code",
+        throttleMs: 60 * 60 * 1000,
+      });
       res.status(400).send(`
         <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
           <h2>Invalid Code</h2>
@@ -407,7 +505,18 @@ export function createOAuthRouter(): Router {
 
       if (!tokenResponse.ok) {
         const text = await tokenResponse.text();
-        console.error(`Token exchange failed: ${tokenResponse.status} ${text}`);
+        // Never log or report `text` raw — the request body we just sent
+        // contains client_secret, code, and code_verifier, and
+        // NationBuilder's error response can echo them back.
+        const exchangeErrorCode = oauthErrorCode(text);
+        console.error(`Token exchange failed: HTTP ${tokenResponse.status}${exchangeErrorCode ? ` (${exchangeErrorCode})` : ""}`);
+        // Unthrottled: reaching this requires a `state` we issued, so volume
+        // is bounded by real authorize attempts, not by internet scanners.
+        reportError({
+          category: "auth_error",
+          message: "oauth_callback: token exchange rejected",
+          context: { http_status: tokenResponse.status, oauth_error: exchangeErrorCode },
+        });
         res.status(500).send(`
           <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
             <h2>Token Exchange Failed</h2>
@@ -454,7 +563,20 @@ export function createOAuthRouter(): Router {
         </body></html>
       `);
     } catch (err) {
-      console.error("OAuth callback error:", err);
+      // A SyntaxError parsing a 200 response quotes the offending body in
+      // its message, which can contain the access token — never pass it
+      // through as-is.
+      const safe = err instanceof SyntaxError
+        ? new Error("SyntaxError parsing token response (body withheld)")
+        : err;
+      console.error("OAuth callback error:", safeErr(safe));
+      // Unthrottled: reaching this requires a `state` we issued, so volume is
+      // bounded by real authorize attempts.
+      reportError({
+        category: "auth_error",
+        message: "oauth_callback: token exchange failed",
+        rawError: safe,
+      });
       res.status(500).send(`
         <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
           <h2>Error</h2>

@@ -213,7 +213,22 @@ export function registerSignupTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
-        reportError({ category: "tool_error", message: "search_people failed", rawError: error, context: { params } });
+        // context carries which filters were set, never their values — params
+        // routinely contains an operator-typed email/name/note (see `query`,
+        // `note_contains`), which must not leave the process in a report.
+        reportError({
+          category: "tool_error",
+          message: "search_people failed",
+          rawError: error,
+          context: {
+            param_keys: Object.entries(params)
+              .filter(([, v]) => v !== undefined)
+              .map(([k]) => k)
+              .sort(),
+            page_size: params.page_size,
+            page_number: params.page_number,
+          },
+        });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error searching people: ${error instanceof Error ? error.message : String(error)}` }],
@@ -506,7 +521,19 @@ export function registerSignupTools(
           content: [{ type: "text" as const, text: sanitizeText(result) }],
         };
       } catch (error) {
-        reportError({ category: "tool_error", message: "advanced_search failed", rawError: error, context: { params } });
+        // filter_keys/has_tag only — filters is an arbitrary caller-supplied
+        // object that can carry member PII (email, name, note text).
+        reportError({
+          category: "tool_error",
+          message: "advanced_search failed",
+          rawError: error,
+          context: {
+            filter_keys: Object.keys(params.filters ?? {}),
+            has_tag: !!params.tag,
+            page_size: params.page_size,
+            page_number: params.page_number,
+          },
+        });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error in advanced search: ${error instanceof Error ? error.message : String(error)}` }],

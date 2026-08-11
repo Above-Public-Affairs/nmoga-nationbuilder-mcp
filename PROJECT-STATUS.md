@@ -28,6 +28,6 @@
 - [ ] Set Railway env vars (NATIONBUILDER_SLUG, NATIONBUILDER_ACCESS_TOKEN, MCP_AUTH_TOKEN)
 - [ ] Configure Claude Desktop with mcp-remote connection
 - [ ] Test all 17 tools end-to-end against live NationBuilder
-- [ ] Add error reporting (error-reporter.ts)
+- [x] Add error reporting (error-reporter.ts) — 2026-08-11: full coverage (process/exit paths, all three Express routes, remaining OAuth paths, client retry diagnostics) with throttling and PII/secret scrubbing; see CHANGELOG.md
 - [ ] Update CLAUDE.md Active Projects table
 - [ ] Update PROJECTS-STATUS.md

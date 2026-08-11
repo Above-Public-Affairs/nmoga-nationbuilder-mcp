@@ -16,9 +16,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "crypto";
+import type { Server } from "node:http";
 import express from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
 import { bootstrapToken, createOAuthRouter, getOAuthToken, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
+import { reportError, reportErrorThrottled, reportAndFlush, safeErr } from "./utils/errorReporter.js";
 import { registerSignupTools } from "./tools/signups.js";
 import { registerTagTools } from "./tools/tags.js";
 import { registerContactTools } from "./tools/contacts.js";
@@ -86,8 +88,11 @@ function validateEnv(): { slug: string; staticToken: string | null } {
   const staticToken = process.env.NATIONBUILDER_ACCESS_TOKEN || null;
 
   if (!slug) {
-    console.error("Error: NATIONBUILDER_SLUG environment variable is required");
-    process.exit(1);
+    // Thrown, not exited directly: main().catch reports startup_error via the
+    // flush-before-exit path and then exits. A bare process.exit(1) here
+    // would report nothing — silent in the one place a deploy is most likely
+    // to fail.
+    throw new Error("missing required environment variable: NATIONBUILDER_SLUG");
   }
 
   if (!staticToken && !isOAuthConfigured()) {
@@ -95,6 +100,16 @@ function validateEnv(): { slug: string; staticToken: string | null } {
       "Warning: No NATIONBUILDER_ACCESS_TOKEN and OAuth not configured. " +
       "Set NATIONBUILDER_ACCESS_TOKEN or configure OAuth (NATIONBUILDER_CLIENT_ID, NATIONBUILDER_CLIENT_SECRET)."
     );
+    // Boots anyway, but every tool call will fail until someone sets a
+    // credential — worth a row, not just a log line nobody's watching.
+    reportError({
+      category: "auth_error",
+      message: "startup: no NATIONBUILDER_ACCESS_TOKEN and OAuth is not configured",
+      context: {
+        has_client_id: !!process.env.NATIONBUILDER_CLIENT_ID,
+        has_callback_url: !!(process.env.NATIONBUILDER_OAUTH_CALLBACK_URL || process.env.RAILWAY_PUBLIC_DOMAIN),
+      },
+    });
   }
 
   return { slug, staticToken };
@@ -201,47 +216,40 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
-    if (sessionId && streamableTransports.has(sessionId)) {
-      // Existing session — route to its transport
-      sessionLastSeen.set(sessionId, Date.now());
-      await streamableTransports.get(sessionId)!.handleRequest(req, res);
-    } else if (sessionId) {
-      // Session ID we don't recognise — the server restarted, or we reaped it.
-      //
-      // This MUST be 404, not 400. The Streamable HTTP spec says a client that
-      // gets 404 for its session ID starts a fresh session with a new
-      // initialize; a 400 is instead read as a fatal protocol error, so the
-      // client gives up and the connector goes dark with zero tools loaded
-      // until someone reconnects it by hand. That was the "connection dropped
-      // unexpectedly / no NationBuilder tools" report.
-      console.error(`Unknown session ${sessionId} — telling client to re-initialize`);
-      res.status(404).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32001,
-          message: "Session not found or expired. Start a new session with an initialize request.",
-        },
-        id: null,
-      });
-    } else if (req.method === "POST") {
-      // New session — first POST has no session ID (the initialize request)
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-      });
+    try {
+      if (sessionId && streamableTransports.has(sessionId)) {
+        // Existing session — route to its transport
+        sessionLastSeen.set(sessionId, Date.now());
+        await streamableTransports.get(sessionId)!.handleRequest(req, res);
+      } else if (sessionId) {
+        // Session ID we don't recognise — the server restarted, or we reaped it.
+        //
+        // This MUST be 404, not 400. The Streamable HTTP spec says a client that
+        // gets 404 for its session ID starts a fresh session with a new
+        // initialize; a 400 is instead read as a fatal protocol error, so the
+        // client gives up and the connector goes dark with zero tools loaded
+        // until someone reconnects it by hand. That was the "connection dropped
+        // unexpectedly / no NationBuilder tools" report.
+        console.error(`Unknown session ${sessionId} — telling client to re-initialize`);
+        res.status(404).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32001,
+            message: "Session not found or expired. Start a new session with an initialize request.",
+          },
+          id: null,
+        });
+      } else if (req.method === "POST") {
+        // New session — first POST has no session ID (the initialize request)
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+        });
 
-      const server = createServer(slug, getToken);
-      await server.connect(transport);
-
-      // handleRequest processes the initialize and sets the session ID
-      // in the response header automatically
-      await transport.handleRequest(req, res);
-
-      // After handleRequest, transport.sessionId is now set
-      if (transport.sessionId) {
-        console.error(`New Streamable HTTP session: ${transport.sessionId}`);
-        streamableTransports.set(transport.sessionId, transport);
-        sessionLastSeen.set(transport.sessionId, Date.now());
-
+        // Set before handleRequest, not after: if the client aborts during
+        // the initialize round-trip, onclose can fire while handleRequest is
+        // still pending. Setting it only after handleRequest resolves would
+        // leave a dead transport registered forever with nothing to clean it
+        // up, since onclose already fired without a listener attached.
         transport.onclose = () => {
           console.error(`Streamable HTTP session closed: ${transport.sessionId}`);
           if (transport.sessionId) {
@@ -249,12 +257,44 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
             sessionLastSeen.delete(transport.sessionId);
           }
         };
+
+        const server = createServer(slug, getToken);
+        await server.connect(transport);
+
+        // handleRequest processes the initialize and sets the session ID
+        // in the response header automatically
+        await transport.handleRequest(req, res);
+
+        // After handleRequest, transport.sessionId is now set
+        if (transport.sessionId) {
+          console.error(`New Streamable HTTP session: ${transport.sessionId}`);
+          streamableTransports.set(transport.sessionId, transport);
+          sessionLastSeen.set(transport.sessionId, Date.now());
+        }
+      } else {
+        // GET or DELETE with no session ID at all — nothing to attach to.
+        // (DELETE for a live session is handled by the transport above, which
+        // terminates it and fires onclose.)
+        res.status(400).json({ error: "Missing Mcp-Session-Id header" });
       }
-    } else {
-      // GET or DELETE with no session ID at all — nothing to attach to.
-      // (DELETE for a live session is handled by the transport above, which
-      // terminates it and fires onclose.)
-      res.status(400).json({ error: "Missing Mcp-Session-Id header" });
+    } catch (err) {
+      // Express 4 does not catch async rejections: without this, one
+      // rejected await here reaches unhandledRejection and takes the whole
+      // server down for every user, not just this request.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("/mcp handler error:", safeErr(err));
+      reportError({
+        category: "tool_error",
+        message: `mcp_endpoint: ${message}`,
+        rawError: err,
+        context: {
+          http_method: req.method,
+          has_session_id: !!sessionId,
+          sessions_open: streamableTransports.size,
+        },
+      });
+      if (!res.headersSent) res.status(500).json({ error: "server_error" });
+      else if (!res.writableEnded) res.end();
     }
   });
 
@@ -266,14 +306,30 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     const sessionId = transport.sessionId;
     sseTransports.set(sessionId, transport);
 
-    const server = createServer(slug, getToken);
-
     res.on("close", () => {
       console.error(`SSE connection closed: ${sessionId}`);
       sseTransports.delete(sessionId);
     });
 
-    await server.connect(transport);
+    try {
+      const server = createServer(slug, getToken);
+      await server.connect(transport);
+    } catch (err) {
+      // server.connect() writes the SSE response head as part of
+      // establishing the stream, so by the time this can throw, headers are
+      // almost always already sent — never attempt a JSON 500 here.
+      console.error("/sse handler error:", safeErr(err));
+      reportError({
+        category: "tool_error",
+        message: `sse_endpoint: ${err instanceof Error ? err.message : String(err)}`,
+        rawError: err,
+      });
+      // connect() failed, so this entry never got a live stream behind it —
+      // don't wait on res's "close" event to clean it up.
+      sseTransports.delete(sessionId);
+      if (!res.headersSent) res.status(500).json({ error: "server_error" });
+      else if (!res.writableEnded) res.end();
+    }
   });
 
   // Legacy messages endpoint
@@ -286,17 +342,45 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
       return;
     }
 
-    await transport.handlePostMessage(req, res);
+    try {
+      await transport.handlePostMessage(req, res);
+    } catch (err) {
+      // The SDK writes a 500 and ends the response before throwing here (its
+      // SSE stream is already gone) — headers are always sent by this point,
+      // so a second res.status(500).json(...) would throw
+      // ERR_HTTP_HEADERS_SENT and crash the server a second time from
+      // inside this very catch.
+      console.error("/messages handler error:", safeErr(err));
+      reportError({
+        category: "tool_error",
+        message: `messages_endpoint: ${err instanceof Error ? err.message : String(err)}`,
+        rawError: err,
+      });
+      // The throw means the transport's stream is gone — drop the now-stale
+      // entry so a retried POST to this session doesn't hit the same dead end.
+      sseTransports.delete(sessionId);
+      if (!res.headersSent) res.status(500).json({ error: "server_error" });
+      else if (!res.writableEnded) res.end();
+    }
   });
 
   // Refresh OAuth token periodically (every 30 minutes)
   setInterval(() => {
-    refreshTokenIfNeeded().catch((err) =>
-      console.error("Token refresh interval error:", err)
-    );
+    // doRefresh() (called via refreshTokenIfNeeded) owns failure reporting —
+    // it knows *why* refresh failed and holds its own throttle state. This
+    // catch only covers an unexpected throw from the interval itself.
+    refreshTokenIfNeeded().catch((err) => {
+      console.error("Token refresh interval error:", safeErr(err));
+      reportErrorThrottled({
+        category: "auth_error",
+        message: "token_refresh_interval: threw unexpectedly",
+        rawError: err,
+        throttleKey: "refresh_interval_threw",
+      });
+    });
   }, 30 * 60 * 1000);
 
-  app.listen(port, () => {
+  httpServer = app.listen(port, () => {
     console.error(`NMOGA NationBuilder MCP server listening on port ${port}`);
     console.error(`Streamable HTTP: http://localhost:${port}/mcp`);
     console.error(`Legacy SSE: http://localhost:${port}/sse`);
@@ -309,17 +393,23 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     // user discover they're dead. Deliberately not awaited — the server should
     // come up and answer health checks even if NationBuilder is slow.
     if (isOAuthConfigured()) {
-      bootstrapToken().catch((err) =>
-        console.error("Startup token bootstrap error:", err)
-      );
+      bootstrapToken().catch((err) => {
+        console.error("Startup token bootstrap error:", safeErr(err));
+        reportErrorThrottled({
+          category: "auth_error",
+          message: "startup_bootstrap: threw unexpectedly",
+          rawError: err,
+          throttleKey: "bootstrap_threw",
+        });
+      });
     }
   });
 }
 
 async function startStdioServer(slug: string, staticToken: string | null): Promise<void> {
   if (!staticToken) {
-    console.error("Error: NATIONBUILDER_ACCESS_TOKEN is required for stdio mode (OAuth is HTTP-only)");
-    process.exit(1);
+    // Thrown, not exited directly — see the matching comment in validateEnv().
+    throw new Error("NATIONBUILDER_ACCESS_TOKEN is required for stdio mode (OAuth is HTTP-only)");
   }
   const server = createServer(slug, staticToken);
   const transport = new StdioServerTransport();
@@ -332,11 +422,61 @@ async function startStdioServer(slug: string, staticToken: string | null): Promi
   await server.connect(transport);
 }
 
-async function main(): Promise<void> {
-  const { slug, staticToken } = validateEnv();
+// Set once startSseServer's app.listen() resolves, so a fatal error can stop
+// accepting new HTTP work before flushing a report and exiting. Stays
+// undefined in stdio mode — reportAndExit's close is then a no-op.
+let httpServer: Server | undefined;
 
-  // Set up process handlers
+/** Upper bound on how long a fatal-path report may delay process exit. */
+const REPORT_FLUSH_TIMEOUT_MS = 1500;
+let exiting = false;
+
+/**
+ * Await a fatal-path report against a hard deadline, then exit. Never hangs
+ * and never re-enters if a second fatal event lands mid-flush.
+ *
+ * Deliberately NOT `Promise.race([reportAndFlush(...), timeout])`: if that
+ * timeout promise rejects, the await throws, and because this function is
+ * async that becomes a rejected promise — Node doesn't await
+ * uncaughtException listeners, so it lands in unhandledRejection, which
+ * calls reportAndExit again, which arms another timer, forever.
+ * process.exit() is never reached and the process limps on serving requests
+ * instead of dying in microseconds like it does today. A `setTimeout` used
+ * purely as a deadline can't reject, so that trap doesn't exist here. The
+ * `exiting` guard exists because Node won't self-exit while an
+ * uncaughtException listener is installed — without it, a hot error source
+ * inside the window emits unbounded reports before either timer fires.
+ *
+ * Closes the HTTP listener before flushing so a destructive tool call that
+ * hasn't started yet can't begin during the flush window — this server does
+ * delete-in-a-loop tool calls, and widening the crash window from
+ * microseconds to ~1.5s should shrink the blast radius, not grow it.
+ */
+async function reportAndExit(code: number, category: string, message: string, rawError?: unknown): Promise<void> {
+  if (exiting) return;
+  exiting = true;
+
+  try {
+    httpServer?.close();
+  } catch {
+    /* already closing/closed */
+  }
+
+  const deadline = setTimeout(() => process.exit(code), REPORT_FLUSH_TIMEOUT_MS);
+  deadline.unref();
+
+  await reportAndFlush({ category, message, rawError });
+  clearTimeout(deadline);
+  process.exit(code);
+}
+
+async function main(): Promise<void> {
+  // Set up process handlers first, so a throw from validateEnv() below is
+  // still caught by main().catch (registered at module load, below) even
+  // though these listeners aren't strictly needed for that particular path.
   process.on("SIGTERM", () => {
+    // Railway sends this on every redeploy — normal shutdown, not an error.
+    // Do not report it; that would put one row per deploy into the digest.
     console.error("Received SIGTERM, shutting down...");
     process.exit(0);
   });
@@ -348,13 +488,15 @@ async function main(): Promise<void> {
 
   process.on("uncaughtException", (error) => {
     console.error("Uncaught exception:", error);
-    process.exit(1);
+    void reportAndExit(1, "uncaught_exception", error instanceof Error ? error.message : String(error), error);
   });
 
   process.on("unhandledRejection", (reason) => {
     console.error("Unhandled rejection:", reason);
-    process.exit(1);
+    void reportAndExit(1, "unhandled_rejection", reason instanceof Error ? reason.message : String(reason), reason);
   });
+
+  const { slug, staticToken } = validateEnv();
 
   // Hydrate OAuth token from env vars (if persisted from prior session)
   if (isOAuthConfigured()) {
@@ -372,5 +514,5 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   console.error("Fatal error:", error);
-  process.exit(1);
+  void reportAndExit(1, "startup_error", `fatal: ${error instanceof Error ? error.message : String(error)}`, error);
 });
