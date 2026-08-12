@@ -103,11 +103,13 @@ export function reportError(params: ReportParams): void {
 
 const DEFAULT_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
 
-/** Upper bound on distinct throttle keys tracked at once. One key here
- *  (per-OAuth-error-code on the public callback route) is derived from
- *  request input, so this is a backstop against unbounded growth, not a
- *  realistic ceiling for the fixed keys used everywhere else. */
-const MAX_THROTTLE_KEYS = 200;
+/** Upper bound on distinct throttle keys tracked at once. Most keys here are
+ *  fixed strings, but per-user auth throttle keys (one per connected
+ *  NationBuilder account) and the per-OAuth-error-code key on the public
+ *  callback route are both derived from request/user input, so this is a
+ *  backstop against unbounded growth — sized well above what a normal team
+ *  plus a handful of external users should ever reach. */
+const MAX_THROTTLE_KEYS = 500;
 
 interface ThrottleState {
   lastSentAt: number;
@@ -146,7 +148,22 @@ export function reportErrorThrottled(params: ThrottledReportParams): void {
     return;
   }
 
-  if (!state && throttleState.size >= MAX_THROTTLE_KEYS) throttleState.clear();
+  // Evict the single oldest key rather than clear()ing the whole map: with
+  // per-user keys now in play, hitting the ceiling is plausible in normal
+  // operation, and a full clear() would reopen every other key's suppression
+  // window at once — a burst of duplicate reports for users who were already
+  // being throttled correctly, not just the one that pushed us over.
+  if (!state && throttleState.size >= MAX_THROTTLE_KEYS) {
+    let oldestKey: string | null = null;
+    let oldestAt = Infinity;
+    for (const [key, entry] of throttleState) {
+      if (entry.lastSentAt < oldestAt) {
+        oldestAt = entry.lastSentAt;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey !== null) throttleState.delete(oldestKey);
+  }
   const suppressed = state?.suppressed ?? 0;
   throttleState.set(throttleKey, { lastSentAt: now, suppressed: 0 });
 

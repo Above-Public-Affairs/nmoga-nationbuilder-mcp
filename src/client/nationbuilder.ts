@@ -11,9 +11,17 @@ import type {
   JsonApiErrorResponse,
   QueryParams,
 } from "../types/index.js";
-import { RateLimiter } from "../utils/rateLimiter.js";
+import { getRateLimiter } from "../utils/rateLimiter.js";
 import { reportError, reportErrorThrottled } from "../utils/errorReporter.js";
-import { forceRefreshToken } from "../oauth.js";
+
+/**
+ * The exact prefix `index.ts`'s tokenGetter throws when no token is
+ * available for the caller. Exported so both sides of the contract read from
+ * one source instead of two independent string literals held together only
+ * by a comment — the client below fast-fails on this exact prefix rather
+ * than burning retries on a condition that can't self-resolve.
+ */
+export const NO_TOKEN_PREFIX = "No access token available";
 
 export interface NationBuilderClient {
   get<T>(resource: string, params?: QueryParams): Promise<JsonApiResponse<T>>;
@@ -24,13 +32,37 @@ export interface NationBuilderClient {
   v1Request<R>(method: string, path: string, body?: unknown): Promise<R>;
 }
 
+export interface NationBuilderClientOptions {
+  /**
+   * Called on a 401 to attempt a token refresh. Returns true if the caller
+   * should retry with a fresh token. Deliberately not calling `forceRefreshToken`
+   * from oauth.ts directly — that was a hardwired dependency on exactly one
+   * (module-global) token, which is what made this client unable to serve
+   * more than one caller. The caller now owns *whose* token gets refreshed.
+   */
+  onUnauthorized?: () => Promise<boolean>;
+  /**
+   * Scopes auth-related throttle keys (nb_no_token, nb_401_unrecovered) to a
+   * specific caller, so one broken connection doesn't suppress the report
+   * for every other caller sharing the same throttle window. Leave unset for
+   * a single shared caller (e.g. stdio mode) where that scoping isn't needed.
+   * Rate-limit/5xx throttle keys stay global regardless — those are per-IP
+   * infrastructure facts, not per-caller ones.
+   */
+  userTag?: string;
+}
+
 export function createNationBuilderClient(
   slug: string,
-  accessToken: string | (() => string)
+  accessToken: string | (() => string),
+  opts: NationBuilderClientOptions = {}
 ): NationBuilderClient {
   const baseUrl = `https://${slug}.nationbuilder.com/api/v2`;
-  const rateLimiter = new RateLimiter();
+  // Shared per-nation, not per-client: NationBuilder's 250-req/10s limit is
+  // per IP, and every client instance on this container shares one IP.
+  const rateLimiter = getRateLimiter(slug);
   const retryLimit = 3;
+  const throttleKey = (base: string): string => opts.userTag ? `${base}:${opts.userTag}` : base;
 
   function getToken(): string {
     return typeof accessToken === "function" ? accessToken() : accessToken;
@@ -150,10 +182,16 @@ export function createNationBuilderClient(
 
         const response = await fetch(url, fetchOptions);
 
-        // Handle auth errors — try auto-refresh, then direct user to re-authorize
+        // Handle auth errors — try auto-refresh, then direct the caller to reconnect.
+        // Note there is no working /oauth/authorize link to print here: this
+        // server's connector flow runs entirely inside claude.ai's own OAuth
+        // dance, not a link a tool-call error message can hand back.
+        const RECONNECT_HINT =
+          "Reconnect this connector in claude.ai: Settings → Connectors → " +
+          "remove and re-add this connector, then complete the NationBuilder login.";
         if (response.status === 401 && attempt < retryLimit - 1) {
           console.error("Got 401 — attempting token refresh...");
-          const refreshed = await forceRefreshToken();
+          const refreshed = (await opts.onUnauthorized?.()) ?? false;
           if (refreshed) {
             console.error("Token refreshed, retrying request...");
             continue; // retry with new token (buildHeaders() will pick it up)
@@ -164,23 +202,13 @@ export function createNationBuilderClient(
           // hits a 500, the final report should reflect the 500, not a stale
           // 401 that already resolved itself.
           lastStatus = 401;
-          const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
-          const authorizeUrl = domain
-            ? `https://${domain}/oauth/authorize`
-            : "/oauth/authorize";
           throw new Error(
-            `NationBuilder authentication failed. Your access token is expired and refresh failed.\n` +
-            `Re-authorize here: ${authorizeUrl}`
+            `NationBuilder authentication failed. Your access token is expired and refresh failed.\n${RECONNECT_HINT}`
           );
         } else if (response.status === 401) {
           lastStatus = 401;
-          const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
-          const authorizeUrl = domain
-            ? `https://${domain}/oauth/authorize`
-            : "/oauth/authorize";
           throw new Error(
-            `NationBuilder authentication failed. Your access token is missing or expired.\n` +
-            `Re-authorize here: ${authorizeUrl}`
+            `NationBuilder authentication failed. Your access token is missing or expired.\n${RECONNECT_HINT}`
           );
         }
 
@@ -251,8 +279,19 @@ export function createNationBuilderClient(
         // A missing token will not fix itself on retry — stop immediately
         // instead of burning the remaining attempts (and duplicating this
         // report up to `retryLimit` times).
-        if (lastError.message.startsWith("No access token available")) {
+        if (lastError.message.startsWith(NO_TOKEN_PREFIX)) {
           noToken = true;
+          break;
+        }
+        // A refresh that already failed once will not succeed on the next
+        // attempt either — this string is thrown only after
+        // opts.onUnauthorized() already returned false above. Without this
+        // check, the outer `else` branch below (which only recognizes the
+        // "NationBuilder API error" prefix as terminal) let a dead refresh
+        // token retry into a *second* 401-and-refresh-attempt before giving
+        // up, doubling both the NationBuilder round-trips and the refresh
+        // calls for every request that lands here.
+        if (lastError.message.startsWith("NationBuilder authentication failed")) {
           break;
         }
         if (attempt < retryLimit - 1 && !lastError.message.includes("NationBuilder API error")) {
@@ -268,11 +307,14 @@ export function createNationBuilderClient(
     const path = safePath(url);
 
     if (noToken) {
+      // Scoped per-caller (when userTag is set): one connector with a dead
+      // token must not suppress this report for every other connected user
+      // sharing the module-level throttle map.
       reportErrorThrottled({
         category: "auth_error",
         message: "nationbuilder_client: no access token available",
         context: { method, path },
-        throttleKey: "nb_no_token",
+        throttleKey: throttleKey("nb_no_token"),
         throttleMs: 60 * 60 * 1000,
       });
     } else if (lastStatus === 401) {
@@ -280,7 +322,7 @@ export function createNationBuilderClient(
         category: "auth_error",
         message: "nationbuilder_client: still 401 after token refresh",
         context: { method, path, attempts: attemptsMade },
-        throttleKey: "nb_401_unrecovered",
+        throttleKey: throttleKey("nb_401_unrecovered"),
         throttleMs: 60 * 60 * 1000,
       });
     } else if (lastStatus === 429) {

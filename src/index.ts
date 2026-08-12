@@ -20,7 +20,8 @@ import type { Server } from "node:http";
 import express from "express";
 import type { Request, Response } from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
-import { bootstrapToken, createOAuthRouter, getOAuthToken, getTokenStoreStatus, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
+import type { NationBuilderClientOptions } from "./client/nationbuilder.js";
+import { bootstrapToken, createOAuthRouter, forceRefreshToken, getOAuthToken, getTokenStoreStatus, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
 import { reportError, reportErrorThrottled, reportAndFlush, safeErr } from "./utils/errorReporter.js";
 import { getMcpUrlSecret, isAuthorized } from "./utils/httpAuth.js";
 import { registerSignupTools } from "./tools/signups.js";
@@ -131,7 +132,8 @@ function validateEnv(): { slug: string; staticToken: string | null } {
 
 function createServer(
   slug: string,
-  tokenGetter: string | (() => string)
+  tokenGetter: string | (() => string),
+  clientOpts: NationBuilderClientOptions = {}
 ): McpServer {
   const server = new McpServer(
     {
@@ -143,7 +145,7 @@ function createServer(
     }
   );
 
-  const client = createNationBuilderClient(slug, tokenGetter);
+  const client = createNationBuilderClient(slug, tokenGetter, clientOpts);
 
   // Register all tools
   registerSignupTools(server, client);
@@ -170,6 +172,11 @@ function createServer(
 async function startSseServer(slug: string, staticToken: string | null): Promise<void> {
   const port = parseInt(process.env.PORT || "3000", 10);
   const app = express();
+  // Trust exactly one hop (Railway's own proxy) so req.ip/req.protocol reflect
+  // the real client instead of the proxy. A specific hop count, not `true` —
+  // `true` trusts every hop in X-Forwarded-For, which lets any caller spoof
+  // their own IP and defeats per-IP rate limiting outright.
+  app.set("trust proxy", 1);
 
   // Token getter: prefer OAuth token, fall back to static token
   const getToken = (): string => {
@@ -280,7 +287,13 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
       if (sessionId && streamableTransports.has(sessionId)) {
         // Existing session — route to its transport
         sessionLastSeen.set(sessionId, Date.now());
-        await streamableTransports.get(sessionId)!.handleRequest(req, res);
+        // Passing req.body explicitly (undefined today, since nothing here
+        // mounts a body parser) is defence-in-depth: the SDK reads the raw
+        // request stream itself only when the third arg is omitted, so once
+        // any route ever adds a body parser upstream of this one, an
+        // omitted third arg here would hang waiting on a stream that parser
+        // already drained.
+        await streamableTransports.get(sessionId)!.handleRequest(req, res, req.body);
       } else if (sessionId) {
         // Session ID we don't recognise — the server restarted, or we reaped it.
         //
@@ -331,12 +344,12 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
           }
         };
 
-        const server = createServer(slug, getToken);
+        const server = createServer(slug, getToken, { onUnauthorized: forceRefreshToken });
         await server.connect(transport);
 
         // handleRequest processes the initialize and sets the session ID
         // in the response header automatically
-        await transport.handleRequest(req, res);
+        await transport.handleRequest(req, res, req.body);
 
         // After handleRequest, transport.sessionId is now set
         if (transport.sessionId) {
@@ -414,7 +427,7 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     });
 
     try {
-      const server = createServer(slug, getToken);
+      const server = createServer(slug, getToken, { onUnauthorized: forceRefreshToken });
       await server.connect(transport);
     } catch (err) {
       // server.connect() writes the SSE response head as part of
@@ -446,7 +459,7 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     }
 
     try {
-      await transport.handlePostMessage(req, res);
+      await transport.handlePostMessage(req, res, req.body);
     } catch (err) {
       // The SDK writes a 500 and ends the response before throwing here (its
       // SSE stream is already gone) — headers are always sent by this point,

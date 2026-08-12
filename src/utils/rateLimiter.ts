@@ -59,3 +59,24 @@ export class RateLimiter {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
+
+/**
+ * NationBuilder's rate limit is per-IP, not per-token or per-session — every
+ * caller on this container shares one 250-req/10s budget with every other
+ * caller. A `RateLimiter` created per client/session (the old pattern) gives
+ * each one its own private 200/10s allowance, so a handful of concurrent
+ * sessions can collectively blow well past NationBuilder's real ceiling
+ * without any single one of them seeing a 429 first. One singleton per nation
+ * slug is the correct model; a Map (not a bare singleton) is future-proofing
+ * in case this server ever serves more than one nation.
+ */
+const limiters = new Map<string, RateLimiter>();
+
+export function getRateLimiter(slug: string): RateLimiter {
+  let limiter = limiters.get(slug);
+  if (!limiter) {
+    limiter = new RateLimiter();
+    limiters.set(slug, limiter);
+  }
+  return limiter;
+}
