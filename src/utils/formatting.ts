@@ -39,21 +39,25 @@ export function formatSignup(resource: JsonApiResource<SignupAttributes>): strin
   if (a.signup_type === 1) lines.push(`  Type: Organization`);
 
   if (a.email) lines.push(`  Email: ${a.email}`);
-  if (a.phone) lines.push(`  Phone: ${a.phone}`);
-  if (a.mobile) lines.push(`  Mobile: ${a.mobile}`);
+  if (a.phone_number) lines.push(`  Phone: ${a.phone_number}`);
+  if (a.mobile_number) lines.push(`  Mobile: ${a.mobile_number}`);
   if (a.support_level != null) lines.push(`  Support Level: ${a.support_level}`);
   if (a.is_volunteer) lines.push(`  Volunteer: Yes`);
   if (a.is_donor) lines.push(`  Donor: Yes`);
   if (a.employer) lines.push(`  Employer: ${a.employer}`);
   if (a.occupation) lines.push(`  Occupation: ${a.occupation}`);
 
-  const addressParts = [
-    a.registered_address_city,
-    a.registered_address_state,
-    a.registered_address_zip,
-  ].filter(Boolean);
-  if (addressParts.length > 0) {
-    lines.push(`  Location: ${addressParts.join(", ")}`);
+  // Only present when the caller requested extra_fields[signups]=registered_address
+  // — there is no flat registered_address_city/_state/_zip attribute to read.
+  if (a.registered_address) {
+    const addressParts = [
+      a.registered_address.city,
+      a.registered_address.state,
+      a.registered_address.zip,
+    ].filter(Boolean);
+    if (addressParts.length > 0) {
+      lines.push(`  Location: ${addressParts.join(", ")}`);
+    }
   }
 
   if (a.note) lines.push(`  Note: ${a.note}`);
@@ -130,6 +134,29 @@ export function formatContact(resource: JsonApiResource<ContactAttributes>): str
 
 export function formatTag(resource: JsonApiResource<TagAttributes>): string {
   return `- **${resource.attributes.name}** (ID: ${resource.id})`;
+}
+
+export interface PersonTagEntry {
+  name: string;
+  id: string;
+}
+
+/**
+ * Render a person's tag list. Zero tags renders as an explicit "No tags" —
+ * never as an omitted entry. A prior incident inferred "this person has no
+ * committee tags" from a person simply being absent from a filtered result
+ * set; that inference must not be possible to reach from this tool's output.
+ */
+export function formatPersonTags(personLabel: string, tags: PersonTagEntry[]): string {
+  const lines: string[] = [`**${personLabel}**`];
+  if (tags.length === 0) {
+    lines.push(`  No tags.`);
+  } else {
+    for (const tag of tags) {
+      lines.push(`  - ${tag.name} (ID: ${tag.id})`);
+    }
+  }
+  return lines.join("\n");
 }
 
 export function formatList(resource: JsonApiResource<ListAttributes>): string {
@@ -572,16 +599,130 @@ export function formatIncludedSection(included?: JsonApiResource<unknown>[]): st
   return `\n---\n**Included:**\n\n${sections.join("\n\n")}`;
 }
 
+export interface PaginationInfo {
+  /** True only when we have positive evidence there is nothing more to fetch. */
+  complete: boolean;
+  /** A real total NationBuilder reported, if any. NB V2 has not been observed
+   *  to send one on any endpoint this server calls (signups, signup_tags,
+   *  signup_taggings, lists all confirmed empty live) — never fabricate this
+   *  from `response.data.length`, which is a page size, not a count. */
+  total: number | null;
+  /** Page number to request next, or null if `complete` is true. */
+  nextPage: number | null;
+}
+
+/**
+ * The one place that reads a total off `meta`. NB has been seen to use both
+ * `total` and, on some endpoints historically, `total_count` — shared here so
+ * every caller (this file, `tagLookup.ts`) agrees on precedence instead of
+ * duplicating the fallback.
+ */
+export function readTotal(meta: JsonApiResponse<unknown>["meta"]): number | null {
+  if (!meta) return null;
+  if (typeof meta.total === "number") return meta.total;
+  if (typeof meta.total_count === "number") return meta.total_count;
+  return null;
+}
+
+/**
+ * Decide whether a page is the whole answer using only evidence NationBuilder
+ * actually provides, strongest signal first. In production none of the
+ * `meta`/`links` branches have ever fired for this server's endpoints — the
+ * `data.length >= pageSize` fallback is the one path that runs today. That
+ * makes it the load-bearing check, not a rare edge case, so it must never be
+ * silently skipped or degrade to "assume complete."
+ */
+export function resolvePagination<T>(
+  response: JsonApiResponse<T>,
+  pageNumber: number,
+  pageSize: number
+): PaginationInfo {
+  const total = readTotal(response.meta);
+  const totalPages = response.meta?.total_pages || response.meta?.page_count || null;
+
+  if (response.links?.next) {
+    return { complete: false, total, nextPage: pageNumber + 1 };
+  }
+
+  if (totalPages != null) {
+    const complete = pageNumber >= totalPages;
+    return { complete, total, nextPage: complete ? null : pageNumber + 1 };
+  }
+
+  if (total != null) {
+    const complete = pageNumber * pageSize >= total;
+    return { complete, total, nextPage: complete ? null : pageNumber + 1 };
+  }
+
+  // No total, no page count, no next link — the only remaining evidence is
+  // whether this page was full. A full page means more almost certainly
+  // exist; NEVER treat "no signal" as "complete."
+  const full = response.data.length >= pageSize;
+  return { complete: !full, total: null, nextPage: full ? pageNumber + 1 : null };
+}
+
+/**
+ * Footer for a paginated result. Always resolves to an explicit complete-or-
+ * incomplete statement — never a bare "Page N" that could be mistaken for
+ * "that's everything." Terse when complete (this is the common case and runs
+ * on every paginated tool call); an explicit instruction, including the exact
+ * next call, when not.
+ */
 export function formatPagination<T>(response: JsonApiResponse<T>, pageNumber: number, pageSize: number): string {
-  const total = response.meta?.total;
-  const totalPages = response.meta?.total_pages || response.meta?.page_count;
+  const info = resolvePagination(response, pageNumber, pageSize);
 
-  const parts: string[] = [];
-  parts.push(`Page ${pageNumber}`);
-  if (totalPages) parts.push(`of ${totalPages}`);
-  if (total != null) parts.push(`(${total} total)`);
+  if (info.complete) {
+    const totalPart = info.total != null ? ` (${info.total} total)` : "";
+    return `\n---\nPage ${pageNumber}${totalPart} — complete, no more results.`;
+  }
 
-  return `\n---\n${parts.join(" ")}`;
+  const shown = response.data.length;
+  const totalPart = info.total != null ? ` of ${info.total} total` : "";
+  return (
+    `\n---\nINCOMPLETE — page ${pageNumber} returned ${shown} result${shown === 1 ? "" : "s"}${totalPart}. ` +
+    `More results likely exist. Call again with page_number: ${info.nextPage} before treating this as the full answer.`
+  );
+}
+
+/**
+ * One line to place ABOVE the results, not just in the footer. A footer-only
+ * warning is read after a conclusion has already formed from the data above
+ * it — which is exactly how a prior session read 34 page-1 tag scans as
+ * complete. Returns "" when the page is complete, so callers can
+ * unconditionally prepend it with no branching at the call site.
+ */
+export function formatIncompleteHeader<T>(response: JsonApiResponse<T>, pageNumber: number, pageSize: number): string {
+  const info = resolvePagination(response, pageNumber, pageSize);
+  if (info.complete) return "";
+  return `[INCOMPLETE RESULTS — more likely exist beyond page ${pageNumber}; see note at the end]\n\n`;
+}
+
+/**
+ * Wrap a fully-built result body with both the pre-data warning and the
+ * footer, so tool handlers need one call instead of two independent ones that
+ * could drift out of sync with each other.
+ */
+export function paginatedResult<T>(
+  body: string,
+  response: JsonApiResponse<T>,
+  pageNumber: number,
+  pageSize: number
+): string {
+  return (
+    formatIncompleteHeader(response, pageNumber, pageSize) +
+    body +
+    formatPagination(response, pageNumber, pageSize)
+  );
+}
+
+/**
+ * Shared wording for "we stopped fetching before exhausting the result set,"
+ * used by capped walks (tag-membership intersection, person-tag lookups)
+ * that are a different shape from single-page pagination above — there is no
+ * `page_number` to hand back, just a hard cap that was hit.
+ */
+export function formatTruncationNotice(itemLabel: string, shown: number, cap: number): string {
+  return `TRUNCATED — stopped after ${shown} ${itemLabel} (cap: ${cap}). More may exist; this is not the complete set.`;
 }
 
 export function formatDate(dateStr: string): string {

@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { SignupAttributes, QueryParams } from "../types/index.js";
-import { formatSignup, formatPagination, formatIncludedSection, sanitizeText } from "../utils/formatting.js";
+import { formatSignup, formatIncludedSection, paginatedResult, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 import { resolveTagByName, getAllSignupIdsForTagId } from "../utils/tagLookup.js";
 
@@ -20,7 +20,7 @@ export function registerSignupTools(
 ): void {
   server.tool(
     "search_people",
-    "Search for people/supporters in NationBuilder by name, email, or other filters. Returns matching contacts with their key details.",
+    "Search for people/supporters in NationBuilder by name, email, or other filters. Returns matching contacts with their key details. Does not support filtering by address (state/city) or by whether email/phone is present — NationBuilder's V2 filter API has no operator for presence checks, and registered address is not a filterable attribute at all (confirmed against the nation's own OpenAPI spec); those parameters previously 400'd or failed outright and have been removed rather than shipped broken.",
     {
       query: z
         .string()
@@ -67,22 +67,6 @@ export function registerSignupTools(
         .int()
         .optional()
         .describe("Maximum lifetime donation amount in cents"),
-      state: z
-        .string()
-        .optional()
-        .describe("Filter by registered address state (e.g. 'NM', 'TX')"),
-      city: z
-        .string()
-        .optional()
-        .describe("Filter by registered address city"),
-      has_email: z
-        .boolean()
-        .optional()
-        .describe("Filter for people with email (true) or without email (false)"),
-      has_phone: z
-        .boolean()
-        .optional()
-        .describe("Filter for people with phone (true) or without phone (false)"),
       sort_by: z
         .enum(["first_name", "last_name", "created_at", "updated_at", "support_level"])
         .optional()
@@ -112,9 +96,16 @@ export function registerSignupTools(
           page_size: params.page_size,
           page_number: params.page_number,
           fields: {
+            // `phone_number`/`mobile_number`, not `phone`/`mobile` — those
+            // names don't exist on the V2 signup resource (confirmed against
+            // the nation's OpenAPI spec) and were silently dropped by
+            // NationBuilder on every request this server has ever made.
             signups:
-              "first_name,last_name,full_name,email,phone,mobile,support_level,signup_type,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,custom_values,created_at,updated_at",
+              "first_name,last_name,full_name,email,phone_number,mobile_number,support_level,signup_type,is_volunteer,is_donor,employer,occupation,note,custom_values,created_at,updated_at",
           },
+          // registered_address is not a sparse-fieldset attribute at all — it's
+          // an opt-in extra_field, omitted entirely unless requested here.
+          extra_fields: { signups: "registered_address" },
         };
 
         const filter: Record<string, string | Record<string, string>> = {};
@@ -169,25 +160,13 @@ export function registerSignupTools(
           };
         }
 
-        if (params.state) {
-          filter.registered_address_state = params.state;
-        }
-
-        if (params.city) {
-          filter.registered_address_city = params.city;
-        }
-
-        if (params.has_email === true) {
-          filter.email = { not_eq: "null" };
-        } else if (params.has_email === false) {
-          filter.email = "null";
-        }
-
-        if (params.has_phone === true) {
-          filter.phone = { not_eq: "null" };
-        } else if (params.has_phone === false) {
-          filter.phone = "null";
-        }
+        // state/city/has_email/has_phone filter params were removed here —
+        // see the tool description. Address isn't a filterable attribute at
+        // all in V2, and there is no documented presence/absence filter
+        // operator; the old `filter[x]=null`/`filter[x][not_eq]=null`
+        // sentinel-value approach reproducibly failed live (opaque
+        // "Request failed after retries", all 3 attempts exhausted) rather
+        // than actually filtering on presence.
 
         if (params.sort_by) {
           queryParams.sort = params.sort_order === "desc" ? `-${params.sort_by}` : params.sort_by;
@@ -205,14 +184,15 @@ export function registerSignupTools(
           };
         }
 
-        let result = `Found ${response.meta?.total ?? response.data.length} people:\n\n`;
+        // "on this page" — never fabricate a total from `data.length`. NB
+        // sends no total on this endpoint (verified live); paginatedResult
+        // below carries the real completeness signal.
+        let result = `Found ${response.data.length} people on this page:\n\n`;
         for (const person of response.data) {
           result += formatSignup(person) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         // context carries which filters were set, never their values — params
@@ -241,7 +221,7 @@ export function registerSignupTools(
 
   server.tool(
     "get_person",
-    "Get full details for a specific person by their NationBuilder ID. Returns all available fields including contact info, address, support level, and custom values.",
+    "Get details for a specific person by their NationBuilder ID: contact info, address, support level, and custom values. Does NOT include tags — tags are a separate relationship not carried on the signup record; use get_person_tags for those. Does not include donations, memberships, events, or path progress either — use the dedicated list_* tools for those.",
     {
       person_id: z.string().describe("The NationBuilder signup ID"),
     },
@@ -304,11 +284,28 @@ export function registerSignupTools(
     },
     async (params) => {
       try {
-        const attributes: Partial<SignupAttributes> = {};
-        for (const [key, value] of Object.entries(params)) {
+        const { registered_address_city, registered_address_state, registered_address_zip, ...fields } = params;
+
+        const attributes: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(fields)) {
           if (value != null) {
-            (attributes as Record<string, unknown>)[key] = value;
+            attributes[key] = value;
           }
+        }
+
+        // NationBuilder has no flat registered_address_city/_state/_zip
+        // attribute to write to (confirmed against the nation's OpenAPI
+        // spec) — the only writable path is the nested
+        // registered_address_attributes object. The old code sent these
+        // three as flat keys, which NationBuilder's write schema doesn't
+        // recognize; that data was likely silently discarded on every
+        // create_person call that included an address.
+        if (registered_address_city != null || registered_address_state != null || registered_address_zip != null) {
+          attributes.registered_address_attributes = {
+            ...(registered_address_city != null ? { city: registered_address_city } : {}),
+            ...(registered_address_state != null ? { state: registered_address_state } : {}),
+            ...(registered_address_zip != null ? { zip: registered_address_zip } : {}),
+          };
         }
 
         const response = await client.create<SignupAttributes>("signups", {
@@ -318,7 +315,14 @@ export function registerSignupTools(
           },
         });
 
-        const result = `Person created successfully:\n\n${formatSignup(response.data)}`;
+        // Address isn't in the default sparse fieldset — request it
+        // explicitly so a person created with one actually shows it back,
+        // confirming the write landed rather than silently vanishing again.
+        const created = registered_address_city != null || registered_address_state != null || registered_address_zip != null
+          ? await client.getById<SignupAttributes>("signups", response.data.id, { extra_fields: { signups: "registered_address" } })
+          : response;
+
+        const result = `Person created successfully:\n\n${formatSignup(created.data)}`;
 
         return {
           content: [{ type: "text" as const, text: sanitizeText(result) }],
@@ -498,11 +502,16 @@ export function registerSignupTools(
         if (params.fields) {
           queryParams.fields = { signups: params.fields };
         } else {
+          // phone_number/mobile_number, not phone/mobile — those names don't
+          // exist on the V2 signup resource (confirmed against the nation's
+          // OpenAPI spec). registered_address isn't a sparse-fieldset
+          // attribute at all; it's requested separately below.
           queryParams.fields = {
             signups:
-              "first_name,last_name,full_name,email,phone,mobile,support_level,signup_type,is_volunteer,is_donor,employer,occupation,registered_address_city,registered_address_state,registered_address_zip,note,custom_values,created_at,updated_at",
+              "first_name,last_name,full_name,email,phone_number,mobile_number,support_level,signup_type,is_volunteer,is_donor,employer,occupation,note,custom_values,created_at,updated_at",
           };
         }
+        queryParams.extra_fields = { signups: "registered_address" };
 
         const response = await client.get<SignupAttributes>("signups", queryParams);
 
@@ -515,7 +524,12 @@ export function registerSignupTools(
 
         let result = "";
         if (tagHeader) result += `${tagHeader}\n`;
-        result += `Found ${response.meta?.total ?? response.data.length} people:\n\n`;
+        // Never `response.meta?.total ?? response.data.length` — NB sends no
+        // total on this endpoint (verified live), so that fallback silently
+        // prints a page size as if it were a total. "on this page" makes the
+        // distinction explicit; paginatedResult's header/footer below carry
+        // the actual completeness signal.
+        result += `Found ${response.data.length} people on this page:\n\n`;
         for (const person of response.data) {
           result += formatSignup(person) + "\n\n";
         }
@@ -523,10 +537,9 @@ export function registerSignupTools(
         // dropped on the floor here — the call paid the round-trip and the
         // caller never saw the data. See CHANGELOG.
         result += formatIncludedSection(response.included);
-        result += formatPagination(response, params.page_number, params.page_size);
 
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         // filter_keys/has_tag only — filters is an arbitrary caller-supplied

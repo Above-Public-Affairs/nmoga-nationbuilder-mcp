@@ -8,7 +8,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { MailingAttributes, QueryParams } from "../types/index.js";
-import { formatMailing, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { formatMailing, paginatedResult, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
 export function registerMailingTools(
@@ -70,10 +70,8 @@ export function registerMailingTools(
         for (const mailing of response.data) {
           result += formatMailing(mailing) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "list_mailings failed", rawError: error });

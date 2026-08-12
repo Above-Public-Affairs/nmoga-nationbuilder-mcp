@@ -16,7 +16,11 @@ export interface JsonApiResource<T> {
 export interface JsonApiResponse<T> {
   data: JsonApiResource<T>[];
   included?: JsonApiResource<unknown>[];
-  meta?: { total?: number; page_count?: number; total_pages?: number };
+  // NationBuilder V2 does not populate any of these on the endpoints this
+  // server calls (verified live against signups, signup_tags,
+  // signup_taggings, lists) — kept typed in case that changes, or in case
+  // some endpoint does emit one. Never assume one is present.
+  meta?: { total?: number; page_count?: number; total_pages?: number; total_count?: number };
   links?: { self?: string; next?: string; prev?: string; first?: string; last?: string };
 }
 
@@ -67,9 +71,37 @@ export interface QueryParams {
   page_number?: number;
   fields?: Record<string, string>;
   include?: string;
+  /** `extra_fields[resource]=...` — opt-in attributes NationBuilder omits by
+   *  default even from a full sparse-fieldset request (e.g. `registered_address`
+   *  on signups). Distinct from `fields`: sparse fieldsets select among
+   *  always-available attributes, extra_fields requests ones that aren't
+   *  attributes at all until asked for. */
+  extra_fields?: Record<string, string>;
 }
 
 // --- NationBuilder Resource Attributes ---
+
+/**
+ * The shape NationBuilder returns for `registered_address` when requested via
+ * `extra_fields[signups]=registered_address` — confirmed against the
+ * nation's own OpenAPI spec (`registered_address_attributes` write schema;
+ * the read shape mirrors it). Not a flat attribute and not filterable —
+ * there is no `filter[registered_address_state]` or similar; V2 only filters
+ * on scalar attributes in `signup_read_write_attributes` /
+ * `signup_read_only_attributes`, and address lives outside that list
+ * entirely.
+ */
+export interface RegisteredAddress {
+  address1: string | null;
+  address2: string | null;
+  address3: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  county: string | null;
+  country_code: string | null;
+  [key: string]: unknown;
+}
 
 export interface SignupAttributes {
   first_name: string | null;
@@ -77,17 +109,23 @@ export interface SignupAttributes {
   full_name: string | null;
   email: string | null;
   email_opt_in: boolean | null;
-  phone: string | null;
-  mobile: string | null;
+  // NOT `phone`/`mobile` — confirmed against the nation's OpenAPI spec
+  // (`signup_field_values` sparse-fieldset enum has no `phone`/`mobile`
+  // entries, only `phone_number`/`mobile_number`). The old names were
+  // silently ignored by NationBuilder on every read this server has ever
+  // made — sparse-fieldset requests for an unknown name don't error, they
+  // just come back empty, so this went unnoticed.
+  phone_number: string | null;
+  mobile_number: string | null;
   support_level: number | null;
   /** 0 = person, 1 = organization. NB V2 has no `is_organization` attribute. */
   signup_type: number | null;
   is_volunteer: boolean | null;
   is_donor: boolean | null;
-  registered_address_address1: string | null;
-  registered_address_city: string | null;
-  registered_address_state: string | null;
-  registered_address_zip: string | null;
+  // Only present when the request set `extra_fields[signups]=registered_address`
+  // — NationBuilder omits the key entirely otherwise. There is no flat
+  // `registered_address_city`/`_state`/`_zip` attribute (see RegisteredAddress).
+  registered_address?: RegisteredAddress | null;
   employer: string | null;
   occupation: string | null;
   note: string | null;

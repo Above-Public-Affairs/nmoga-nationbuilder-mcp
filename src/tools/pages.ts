@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { PageAttributes, SiteAttributes, QueryParams } from "../types/index.js";
-import { formatPage, formatSite, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { formatPage, formatSite, paginatedResult, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
 export function registerPageTools(
@@ -70,10 +70,8 @@ export function registerPageTools(
         for (const page of response.data) {
           result += formatPage(page) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "list_pages failed", rawError: error });
@@ -150,10 +148,8 @@ export function registerPageTools(
         for (const site of response.data) {
           result += formatSite(site) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "list_sites failed", rawError: error });

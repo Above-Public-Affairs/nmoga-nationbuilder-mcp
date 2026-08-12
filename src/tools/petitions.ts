@@ -8,7 +8,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { PetitionAttributes, QueryParams } from "../types/index.js";
-import { formatPetition, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { formatPetition, paginatedResult, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
 export function registerPetitionTools(
@@ -52,10 +52,8 @@ export function registerPetitionTools(
         for (const petition of response.data) {
           result += formatPetition(petition) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "list_petitions failed", rawError: error });

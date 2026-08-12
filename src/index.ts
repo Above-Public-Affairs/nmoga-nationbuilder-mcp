@@ -68,12 +68,19 @@ NationBuilder supports custom fields on signups. Key custom fields in this natio
 To search by custom fields, use \`search_people\` with the \`custom_field\` and \`custom_field_value\` parameters, or use \`advanced_search\` for more complex queries.
 
 ### Tags
-Tags are the primary way to categorize and segment people. Use \`list_people_with_tag\` to find everyone with a specific tag, and \`list_tags\` to see all available tags.
+Tags work in both directions. Use \`list_people_with_tag\` to find everyone with a specific tag, \`list_tags\` to see all available tags, and **\`get_person_tags\` to find every tag on one or more people** (batch-capable — pass comma-separated IDs to check a whole roster in one call).
 
-Tags are **not** sideloadable from the \`signups\` endpoint — \`advanced_search\`'s \`include\` parameter cannot fetch a person's tags (NationBuilder rejects \`include=tags\` there with an HTTP 400, "not a supported relationship"). Do not conclude from that error, or from an \`include\` that comes back empty, that tag data is unavailable via the API — it is, just through a different path: \`signup_taggings\` filtered by \`filter[signup_id]\` with \`include=tag\` (the same query \`remove_tags_from_person\` runs internally). Use \`list_people_with_tag\` for the common case (which tag), and to go the other direction (which tags does this person have) use the same \`signup_taggings\` pattern.
+Tags are **not** sideloadable from the \`signups\` endpoint — \`advanced_search\`'s \`include\` parameter cannot fetch a person's tags (NationBuilder rejects \`include=tags\` there with an HTTP 400, "not a supported relationship"). Do not conclude from that error, or from an \`include\` that comes back empty, that tag data is unavailable via the API, or that a missing tool means the underlying data doesn't exist — before concluding NationBuilder "doesn't expose" something, check whether a different tool or resource already covers it. \`get_person_tags\` is that path for tags; it queries \`signup_taggings\` filtered by \`filter[signup_id]\` with \`include=tag\` (the same query \`remove_tags_from_person\` runs internally).
+
+A person with zero tags is reported by \`get_person_tags\` as having none, explicitly. Never infer "no tags" from a person's absence in a filtered list — that absence usually means the query didn't reach them, not that no tag applies.
+
+To enumerate every tag matching a pattern (e.g. all committee/workgroup tags), use \`list_tags\` with a \`query\` filter and page to exhaustion — see the pagination note below before treating any single page as the full set.
 
 ### Memberships
 Memberships track organizational membership tiers and statuses. Use \`list_membership_types\` to see available tiers, and \`list_memberships\` to query membership records.
+
+### Pagination — a page is not an answer
+NationBuilder's V2 API sends no result total on the endpoints this server calls (confirmed live against signups, signup_tags, signup_taggings, and lists). Every paginated tool's response states explicitly whether it is complete or not — read that line before treating a page as the full answer. A full page (the count you asked for in \`page_size\`) almost always means more results exist; call again with the next \`page_number\` rather than stopping. This applies to every list_*/search_* tool, not just tag tools — a wrong conclusion has previously been drawn by stopping at page 1 across dozens of calls.
 
 ## Tool Selection Guide
 
@@ -84,6 +91,7 @@ Memberships track organizational membership tiers and statuses. Use \`list_membe
 | Search people or orgs by name/email | \`search_people\` |
 | Search by custom fields | \`search_people\` with custom_field params, or \`advanced_search\` |
 | Find people with a specific tag | \`list_people_with_tag\` |
+| Find every tag on one or more people | \`get_person_tags\` |
 | Create a formal relationship | \`create_native_relationship\` |
 `.trim();
 

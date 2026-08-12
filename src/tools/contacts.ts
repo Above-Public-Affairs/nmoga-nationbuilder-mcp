@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { ContactAttributes, QueryParams } from "../types/index.js";
-import { formatContact, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { formatContact, paginatedResult, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
 export function registerContactTools(
@@ -53,10 +53,8 @@ export function registerContactTools(
         for (const contact of response.data) {
           result += formatContact(contact) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "list_contacts failed", rawError: error, context: { person_id: params.person_id } });

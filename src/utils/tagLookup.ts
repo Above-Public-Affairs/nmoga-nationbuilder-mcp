@@ -13,6 +13,7 @@ import type {
   TaggingAttributes,
   JsonApiResponse,
 } from "../types/index.js";
+import { readTotal } from "./formatting.js";
 
 export interface ResolvedTag {
   id: string;
@@ -75,6 +76,10 @@ export async function getTaggingsPageForTagId(
     pageSize?: number;
     includeSignup?: boolean;
     signupFields?: string;
+    /** e.g. "registered_address" — sideloaded signups only get this data if
+     *  asked for it via extra_fields[signups], same as any direct signup
+     *  fetch; sparse fieldsets alone don't carry it. */
+    signupExtraFields?: string;
   } = {}
 ): Promise<TaggingsPage> {
   const params: Parameters<NationBuilderClient["get"]>[1] = {
@@ -86,6 +91,9 @@ export async function getTaggingsPageForTagId(
     params.include = "signup";
     if (opts.signupFields) {
       params.fields = { signups: opts.signupFields };
+    }
+    if (opts.signupExtraFields) {
+      params.extra_fields = { signups: opts.signupExtraFields };
     }
   }
 
@@ -102,15 +110,11 @@ export async function getTaggingsPageForTagId(
     }
   }
 
-  // NB returns `meta.total` (typed) on paged responses. Some endpoints use
-  // `total_count` historically; fall back to that just in case.
-  const meta = (response.meta ?? {}) as Record<string, unknown>;
-  const total =
-    typeof meta.total === "number"
-      ? meta.total
-      : typeof meta.total_count === "number"
-      ? (meta.total_count as number)
-      : null;
+  // In production this is always null — verified live against
+  // signup_taggings, which (like every other V2 endpoint this server calls)
+  // sends no `meta.total`/`total_count`. Kept in case that ever changes;
+  // never assume it's populated.
+  const total = readTotal(response.meta);
 
   return { signupIds, totalCount: total, raw: response };
 }
@@ -145,10 +149,104 @@ export async function getAllSignupIdsForTagId(
       ids.length = cap;
       break;
     }
-    if (result.signupIds.length < pageSize) break;
+    // Terminate on the RAW page size, not `signupIds.length`. A tagging
+    // whose `signup` relationship is missing is dropped from `signupIds` but
+    // still counts as a row NationBuilder sent — checking the filtered
+    // length ends the walk one page early whenever that happens. With
+    // `totalCount` effectively always null in production, this is the only
+    // termination signal that runs, so it has to be exact.
+    if (result.raw.data.length < pageSize) break;
     if (totalCount !== null && ids.length >= totalCount) break;
     page += 1;
   }
 
   return { signupIds: ids, totalCount, truncated };
+}
+
+export interface SignupTagging {
+  taggingId: string;
+  tagId: string;
+  tagName: string;
+}
+
+/**
+ * Get every tag on each of the given signup IDs — the reverse of
+ * `getAllSignupIdsForTagId` above, and the query `get_person_tags` and
+ * `remove_tags_from_person` both need. Every requested ID is guaranteed a key
+ * in the returned map, even with zero tags: callers must render "no tags"
+ * explicitly rather than omitting the person, which is the exact inference
+ * that caused NationBuilder's tag data to look like it didn't exist.
+ *
+ * Tries the batched `filter[signup_id][in]=<csv>` form first. That operator
+ * is proven only for `filter[id][in]` on `signups` (the client encodes `[in]`
+ * generically for any attribute, which is not the same as NationBuilder
+ * supporting it on this one) — if NB rejects it, this falls back to one
+ * verified-working request per signup, so a batch of 9 costs at most 9
+ * requests either way.
+ */
+export async function getTaggingsForSignupIds(
+  client: NationBuilderClient,
+  signupIds: string[],
+  opts: { pageSize?: number; maxTaggings?: number } = {}
+): Promise<{ bySignupId: Map<string, SignupTagging[]>; truncated: boolean }> {
+  const pageSize = opts.pageSize ?? 100;
+  const cap = opts.maxTaggings ?? 5000;
+  const bySignupId = new Map<string, SignupTagging[]>();
+  for (const id of signupIds) bySignupId.set(id, []);
+  if (signupIds.length === 0) return { bySignupId, truncated: false };
+
+  function ingest(
+    data: JsonApiResponse<TaggingAttributes>["data"],
+    included: JsonApiResponse<unknown>["included"]
+  ): number {
+    for (const tagging of data) {
+      const signupRel = tagging.relationships?.signup?.data;
+      const tagRel = tagging.relationships?.tag?.data;
+      if (!signupRel || Array.isArray(signupRel) || !tagRel || Array.isArray(tagRel)) continue;
+      const list = bySignupId.get(signupRel.id);
+      if (!list) continue; // a signup outside the requested set — ignore
+      const tagResource = included?.find((r) => r.type === "signup_tags" && r.id === tagRel.id);
+      const name = tagResource ? (tagResource.attributes as TagAttributes).name : null;
+      if (name) list.push({ taggingId: tagging.id, tagId: tagRel.id, tagName: name });
+    }
+    return data.length;
+  }
+
+  async function walk(filter: Record<string, string | Record<string, string>>): Promise<{ truncated: boolean }> {
+    let page = 1;
+    let seen = 0;
+    while (true) {
+      const response = await client.get<TaggingAttributes>("signup_taggings", {
+        filter,
+        include: "tag",
+        page_size: pageSize,
+        page_number: page,
+      });
+      seen += ingest(response.data, response.included);
+      if (seen >= cap) return { truncated: true };
+      if (response.data.length < pageSize) return { truncated: false };
+      page += 1;
+    }
+  }
+
+  if (signupIds.length === 1) {
+    const result = await walk({ signup_id: signupIds[0] });
+    return { bySignupId, truncated: result.truncated };
+  }
+
+  try {
+    const result = await walk({ signup_id: { in: signupIds.join(",") } });
+    return { bySignupId, truncated: result.truncated };
+  } catch {
+    // Batched [in] filter rejected, or failed partway through a walk that had
+    // already ingested some pages — reset and redo from scratch with the
+    // verified-working per-signup form so nothing double-counts.
+    for (const id of signupIds) bySignupId.set(id, []);
+    let truncated = false;
+    for (const id of signupIds) {
+      const result = await walk({ signup_id: id });
+      truncated = truncated || result.truncated;
+    }
+    return { bySignupId, truncated };
+  }
 }

@@ -79,6 +79,12 @@ export function createNationBuilderClient(
       }
     }
 
+    if (params.extra_fields) {
+      for (const [resource, fieldList] of Object.entries(params.extra_fields)) {
+        searchParams.set(`extra_fields[${resource}]`, fieldList);
+      }
+    }
+
     if (params.include) {
       searchParams.set("include", params.include);
     }

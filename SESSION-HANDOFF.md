@@ -7,24 +7,52 @@ The server is live on Railway (`nmoga-nationbuilder-mcp`, production environment
 (`/mcp`) as an org Connector, with legacy SSE (`/sse`) kept for older clients. Auth is
 OAuth against the `nmoga` NationBuilder nation, with a static-token fallback.
 
-**This session's fix (about to ship via `/push`):** `advanced_search`'s `include`
-parameter — and `list_memberships`/`get_membership`'s hardcoded `include=signup,membership_type`
-— fetched JSON:API sideloaded data into `response.included` and never rendered it. The
-call succeeded, paid the round-trip, and the caller never saw the data, with no error or
-signal anything was omitted. This produced a wrong conclusion in a sibling session: a
-clean-but-empty `advanced_search(include='tags')` response was read as "the API doesn't
-expose a person's tags." That's doubly wrong — `formatting.ts` already had a `formatTag`
-formatter (the bug was wiring, not missing code), and `include=tags` on `signups` actually
-hard-400s (confirmed live) rather than returning empty; NB validates includes and rejects
-unsupported ones outright. Fix: a shared `formatIncludedResource`/`formatIncludedSection`
-renderer in `src/utils/formatting.ts` (dispatches by JSON:API type to the existing
-formatters; unmapped types get a generic id/type/attrs fallback rather than being
-dropped), wired into `advanced_search` and both membership tools. Also corrected the
-`tags` example in `advanced_search`'s description and the server `INSTRUCTIONS` block —
-both had advertised it as a working value. Full detail in CHANGELOG.md `[2026-08-12]`.
+**This session's fix (about to ship via `/push`):** root incident — a session asked which
+committee/workgroup tags a 9-person roster carried, found no person→tags tool, read
+`get_person`'s "returns all available fields" claim, and concluded *"NationBuilder's API
+doesn't expose a person's tag list."* False — it was a tool gap. It then ran 34 reverse
+tag scans, stopped at page 1 of each, and reported six people as tag-less; that report
+reached a coworker as fact. Fixed:
+
+- **Honest pagination everywhere.** NationBuilder V2 sends no result total on any endpoint
+  this server calls — confirmed live against `signups`, `signup_tags`, `signup_taggings`,
+  `lists`. Every paginated tool now states plainly whether more results exist and the
+  exact next `page_number`, instead of a bare `Page N` that read as complete.
+- **New `get_person_tags` tool** — the reverse of `list_people_with_tag`, batch-capable.
+  Zero tags renders as an explicit "No tags," never omitted.
+- **A real, previously-unknown attribute-naming bug**, found while auditing
+  `search_people`'s filters against the nation's own OpenAPI spec: `phone`, `mobile`, and
+  every flat `registered_address_*` field used throughout this codebase are not real V2
+  attribute names (the real ones are `phone_number`/`mobile_number`, and address is a
+  nested `extra_fields[signups]=registered_address` object, not a sparse-fieldset
+  attribute). NationBuilder silently omits unknown sparse-field names rather than
+  erroring — so **no read tool in this server has ever actually shown a phone number,
+  mobile number, or address**, and `create_person` has likely been silently discarding
+  address data on every call that included one, since its write payload used the same
+  wrong flat keys. Fixed end-to-end (types, client, every tool's field list,
+  `create_person`'s write payload). `search_people`'s `state`/`city`/`has_email`/
+  `has_phone` filters were removed rather than fixed — confirmed against the spec and
+  live that none of the four can work at all (address isn't filterable; NB has no
+  presence/absence filter operator).
+
+Full detail in `CHANGELOG.md`'s `[2026-08-12]` entry (the second one — same date as the
+`advanced_search`/`include` fix below, different session).
+
+**Known gotcha for whoever picks this up next:** a sibling session
+(`claude/nationbuilder-tag-matching-issues-21c879`) built an independent, uncommitted
+implementation of the *same* incident's pagination/tag fixes in a different worktree, with
+a different architecture (an eager `fetchAllPages()` helper vs. this session's honest-but-lazy
+per-page reporting). Neither had committed as of this handoff. If you're resuming either
+branch, check whether the other has since been merged before continuing — otherwise you'll
+be redoing work that already shipped, or shipping something that conflicts with what did.
 
 Earlier fixes, landed and merged to `main`:
 
+- **`advanced_search`'s `include` parameter fetched sideloaded data and never rendered it**
+  (`response.included` fetched, dropped on the floor) — same root incident as above, a
+  different session's fix, already merged. A shared `formatIncludedResource`/
+  `formatIncludedSection` renderer now handles any `include`d resource; `list_memberships`/
+  `get_membership` got the same fix for their hardcoded includes.
 - **Session/OAuth robustness** (`claude/nmoga-nationbuilder-connector-1f497b`, merged via
   PR #1): unknown session IDs now return 404 (so clients auto-recover instead of going
   dark), OAuth token persistence to Railway now tries both credential styles, idle
@@ -75,6 +103,16 @@ manual re-authorize until it's fixed.
   ungated. Either wire it up (and configure the Connector to send it) or drop the variable,
   so it stops reading like protection that isn't there.
 - `RAILWAY_API_TOKEN` is now unused and can be deleted from the service.
+- **Not yet live-verified:** this session's `phone_number`/`mobile_number` rename and the
+  new `extra_fields[signups]=registered_address` query — no static token or deploy access
+  was available in-session to exercise them against the real nation. First live call after
+  deploy should confirm a person's phone/mobile/address actually renders now, and that
+  `create_person` with an address round-trips correctly.
+- **Reconcile with the sibling session's tag/pagination work** (see "Known gotcha" above)
+  before or shortly after this ships — two independent implementations of the same fix
+  shouldn't both land.
 - No `LESSONS.md` yet in this repo — consider starting one if patterns worth compounding
   keep showing up (e.g. "NB V2 attribute names don't match their marketing docs — check
-  the nation's own OpenAPI spec before trusting a HOWTO article or an assumed name").
+  the nation's own OpenAPI spec before trusting a HOWTO article or an assumed name"; this
+  session found a second instance of exactly that pattern with `phone`/`mobile`/
+  `registered_address`).

@@ -12,16 +12,14 @@ MCP server that connects Claude to NMOGA's NationBuilder nation via the NationBu
 - **Auth:** Bearer token (NB test token) + MCP auth token for endpoint protection
 - **Rate limiting:** 250 req/10s sliding window (using 200 for headroom)
 
-## Tools (17)
+## Tools (47)
 
-| Category | Tools |
-|----------|-------|
-| People/Signups | search_people, get_person, create_person, update_person |
-| Tags | list_tags, add_tags_to_person, remove_tags_from_person, list_people_with_tag |
-| Contacts | log_contact, list_contacts |
-| Donations | list_donations, get_donation |
-| Events | list_events, get_event, list_event_rsvps |
-| Lists | list_lists, get_list_people |
+See the [README](README.md#available-tools) for the full, current table — this
+list drifted badly in the past (claimed 17 tools, two of which never existed:
+`log_contact`, `get_donation`) and the README is the version kept in sync with
+`src/tools/*.ts`. Categories: People/Signups, Tags, Contacts, Donations,
+Events, Lists, Relationships, Memberships, Paths, Petitions, Mailings, Pages,
+Automations, Imports, Signup Profiles.
 
 ## Deployment
 

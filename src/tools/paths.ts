@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { PathAttributes, PathJourneyAttributes, QueryParams } from "../types/index.js";
-import { formatPath, formatPathJourney, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { formatPath, formatPathJourney, paginatedResult, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
 export function registerPathTools(
@@ -54,10 +54,8 @@ export function registerPathTools(
         for (const path of response.data) {
           result += formatPath(path) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "list_paths failed", rawError: error });
@@ -171,10 +169,8 @@ export function registerPathTools(
         for (const journey of response.data) {
           result += formatPathJourney(journey, response.included) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "list_path_journeys failed", rawError: error });

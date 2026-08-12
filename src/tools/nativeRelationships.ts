@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { NativeRelationshipAttributes, QueryParams } from "../types/index.js";
-import { formatNativeRelationship, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { formatNativeRelationship, resolvePagination, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
 export function registerNativeRelationshipTools(
@@ -84,13 +84,27 @@ export function registerNativeRelationshipTools(
           };
         }
 
-        let result = `Relationships for person ${params.signup_id}:\n\n`;
+        // Two independently-paginated queries merged into one page number —
+        // "complete" requires BOTH directions to be exhausted, not just the
+        // combined count looking plausible.
+        const firstInfo = resolvePagination(firstResponse, params.page_number, params.page_size);
+        const secondInfo = resolvePagination(secondResponse, params.page_number, params.page_size);
+        const incomplete = !firstInfo.complete || !secondInfo.complete;
+
+        const header = incomplete
+          ? `[INCOMPLETE RESULTS — page ${params.page_number} of each directional query; more relationships may exist. See note at the end]\n\n`
+          : "";
+
+        let result = header + `Relationships for person ${params.signup_id}:\n\n`;
         for (const rel of allRelationships) {
           result += formatNativeRelationship(rel, allIncluded) + "\n\n";
         }
 
         const totalResults = allRelationships.length;
-        result += `Showing ${totalResults} relationship${totalResults === 1 ? "" : "s"}.`;
+        result += `Showing ${totalResults} relationship${totalResults === 1 ? "" : "s"} on page ${params.page_number}`;
+        result += incomplete
+          ? `.\n\nINCOMPLETE — one or both directional queries returned a full page (size ${params.page_size}); more relationships likely exist. Call again with page_number: ${params.page_number + 1} for both directions before treating this as the full list.`
+          : " — complete, no more relationships.";
 
         return {
           content: [{ type: "text" as const, text: sanitizeText(result) }],

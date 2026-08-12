@@ -9,8 +9,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { SignupAttributes } from "../types/index.js";
-import { formatSignup, sanitizeText } from "../utils/formatting.js";
+import { formatSignup, formatTruncationNotice, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
+
+/** Cap on how many employer/parent_id matches these tools will page through
+ *  before giving up and reporting truncation. Neither tool takes a
+ *  page_number param, so silently stopping at the first page (as this code
+ *  used to) reported a false "Found N people" as if it were complete —
+ *  the same defect class as the incident that prompted this file's fixes. */
+const MAX_RELATED_PEOPLE = 1000;
+const PAGE_SIZE = 100;
 
 /** Get the display name of an organization signup */
 async function getOrgName(
@@ -30,22 +38,43 @@ async function getOrgName(
   }
 }
 
-/** Find people whose employer matches a given name */
+/**
+ * Find people whose employer matches a given name. Pages to exhaustion (or
+ * the cap) rather than returning just the first page — this filter has no
+ * total from NationBuilder to check completeness against, so a full first
+ * page with no further paging would silently under-report.
+ */
 async function findPeopleByEmployer(
   client: NationBuilderClient,
   employerName: string
-): Promise<{ id: string; attrs: SignupAttributes }[]> {
+): Promise<{ people: { id: string; attrs: SignupAttributes }[]; truncated: boolean }> {
+  const people: { id: string; attrs: SignupAttributes }[] = [];
+  let page = 1;
+  let truncated = false;
+
   try {
-    const response = await client.get<SignupAttributes>("signups", {
-      filter: { employer: employerName },
-      page_size: 100,
-    });
-    return response.data.map((d) => ({ id: d.id, attrs: d.attributes }));
+    while (true) {
+      const response = await client.get<SignupAttributes>("signups", {
+        filter: { employer: employerName },
+        page_size: PAGE_SIZE,
+        page_number: page,
+      });
+      people.push(...response.data.map((d) => ({ id: d.id, attrs: d.attributes })));
+
+      if (people.length >= MAX_RELATED_PEOPLE) {
+        truncated = true;
+        people.length = MAX_RELATED_PEOPLE;
+        break;
+      }
+      if (response.data.length < PAGE_SIZE) break;
+      page += 1;
+    }
+    return { people, truncated };
   } catch (err) {
     // If employer filter isn't supported, fall back to parent_id
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("400") || msg.includes("could not find")) {
-      return [];
+      return { people: [], truncated: false };
     }
     throw err;
   }
@@ -79,15 +108,17 @@ export function registerRelationshipTools(
         }
 
         // Step 2: Find people by employer match
-        let people = await findPeopleByEmployer(client, orgName);
+        const { people, truncated: employerTruncated } = await findPeopleByEmployer(client, orgName);
 
-        // Step 3: Also try parent_id filter
+        // Step 3: Also try parent_id filter (single page — parent_id is a
+        // secondary, best-effort lookup; if it silently 400s that's fine)
+        let parentTruncated = false;
         try {
           const parentResponse = await client.get<SignupAttributes>(
             "signups",
             {
               filter: { parent_id: params.org_id },
-              page_size: 100,
+              page_size: PAGE_SIZE,
             }
           );
           const existingIds = new Set(people.map((p) => p.id));
@@ -99,6 +130,7 @@ export function registerRelationshipTools(
               });
             }
           }
+          parentTruncated = parentResponse.data.length >= PAGE_SIZE;
         } catch {
           // parent_id filter may not work — that's ok
         }
@@ -127,6 +159,13 @@ export function registerRelationshipTools(
             ? `, ${person.attrs.occupation}`
             : "";
           result += `- **${name}**${email}${occupation} [ID: ${person.id}]\n`;
+        }
+
+        if (employerTruncated) {
+          result += `\n${formatTruncationNotice("employer-matched people", MAX_RELATED_PEOPLE, MAX_RELATED_PEOPLE)}`;
+        }
+        if (parentTruncated) {
+          result += `\n(parent_id lookup returned a full page of ${PAGE_SIZE} — more may exist; this secondary lookup is not paged further)`;
         }
 
         return {
@@ -184,6 +223,7 @@ export function registerRelationshipTools(
         { name: string; email: string; occupation: string; orgName: string }
       > = new Map();
       const errors: string[] = [];
+      const truncatedOrgs: string[] = [];
 
       for (const orgId of ids) {
         try {
@@ -195,7 +235,8 @@ export function registerRelationshipTools(
           }
 
           // Find people by employer
-          const people = await findPeopleByEmployer(client, orgName);
+          const { people, truncated } = await findPeopleByEmployer(client, orgName);
+          if (truncated) truncatedOrgs.push(orgId);
           for (const person of people) {
             const name =
               person.attrs.full_name ||
@@ -228,6 +269,10 @@ export function registerRelationshipTools(
 
       if (errors.length > 0) {
         result += `\n---\nCould not query ${errors.length} org(s): ${errors.join(", ")}`;
+      }
+
+      if (truncatedOrgs.length > 0) {
+        result += `\n---\nTRUNCATED — hit the ${MAX_RELATED_PEOPLE}-person cap for org(s) ${truncatedOrgs.join(", ")}. More employer matches likely exist for these; this is not their complete membership.`;
       }
 
       return {

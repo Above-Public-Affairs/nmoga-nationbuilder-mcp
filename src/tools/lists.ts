@@ -11,7 +11,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { ListAttributes, SignupAttributes, QueryParams } from "../types/index.js";
-import { formatList, formatSignup, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { formatList, formatSignup, paginatedResult, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 
 export function registerListTools(
@@ -56,10 +56,8 @@ export function registerListTools(
         for (const list of response.data) {
           result += formatList(list) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "list_lists failed", rawError: error });
@@ -96,9 +94,15 @@ export function registerListTools(
           page_size: params.page_size,
           page_number: params.page_number,
           fields: {
+            // phone_number/mobile_number, not phone/mobile — confirmed
+            // against the nation's OpenAPI spec; the old names don't exist
+            // on the V2 signup resource and were silently dropped.
             signups:
-              "first_name,last_name,full_name,email,phone,mobile,support_level,is_volunteer,is_donor,registered_address_city,registered_address_state,created_at",
+              "first_name,last_name,full_name,email,phone_number,mobile_number,support_level,is_volunteer,is_donor,created_at",
           },
+          // registered_address isn't a sparse-fieldset attribute — it's an
+          // opt-in extra_field, requested separately here.
+          extra_fields: { signups: "registered_address" },
         };
 
         const response = await client.get<SignupAttributes>(
@@ -116,10 +120,8 @@ export function registerListTools(
         for (const person of response.data) {
           result += formatSignup(person) + "\n\n";
         }
-        result += formatPagination(response, params.page_number, params.page_size);
-
         return {
-          content: [{ type: "text" as const, text: sanitizeText(result) }],
+          content: [{ type: "text" as const, text: sanitizeText(paginatedResult(result, response, params.page_number, params.page_size)) }],
         };
       } catch (error) {
         reportError({ category: "tool_error", message: "get_list_people failed", rawError: error, context: { list_id: params.list_id } });
