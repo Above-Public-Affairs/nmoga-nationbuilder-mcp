@@ -1,53 +1,31 @@
 /**
  * OAuth 2.0 flow for NationBuilder.
  *
- * Two authorize flows share this file's one NationBuilder-facing plumbing
- * (getConfig/getNbOAuthBaseUrl/exchangeCodeForNbTokens/probeNationBuilderIdentity)
- * and its one `/oauth/callback` route, since that path is registered with
- * NationBuilder and can't be duplicated:
+ * This file owns everything this server needs to talk to NationBuilder's
+ * OAuth endpoints — config, the actual code exchange, the best-effort
+ * identity probe, and per-user refresh — and mounts the one route
+ * NationBuilder itself calls back on. The Authorization Server this server
+ * presents to claude.ai (src/auth/provider.ts) is a separate, upstream
+ * concern: it drives the actual `/authorize` request that starts a person's
+ * login and then hands off to this file's exchangeCodeForNbTokens() /
+ * probeNationBuilderIdentity() once NationBuilder redirects back to
+ * `/oauth/callback`, below, via completeUpstreamAuth().
  *
- *   - The legacy shared flow (`/oauth/:secret/authorize` below) — the
- *     pre-per-user gate, writing into the single `LEGACY_USER_KEY` identity.
- *     Kept alive only until the gate flips to the Authorization Server;
- *     nothing new should be built against it.
- *   - The Authorization Server's own upstream leg (src/auth/provider.ts) —
- *     each connecting person's real, individual NationBuilder login. This
- *     is the one everything is migrating to.
+ * `/oauth/callback`'s path is registered with NationBuilder and can't be
+ * moved without updating that registration — so it stays here, fixed, while
+ * everything that constructs the URL a person is sent to lives in
+ * src/auth/provider.ts.
  *
- * `/oauth/callback` distinguishes the two by checking which flow's pending-
- * auth map recognizes the incoming `state` (see hasPendingUpstreamAuth()).
- * There is no ambiguity risk: each flow generates its own random state into
- * its own map, so a collision would require guessing a live 24-byte value.
- *
- * Security: CSRF state parameter, PKCE (S256), HTML output escaping.
+ * Security: CSRF state parameter (owned by provider.ts's pending-auth map),
+ * PKCE (S256), HTML output escaping.
  */
 
 import { Router } from "express";
-import type { Request, Response, NextFunction } from "express";
-import { randomBytes } from "crypto";
 import { reportError, reportErrorThrottled, resetThrottle, safeErr } from "./utils/errorReporter.js";
-import { isAuthorized } from "./utils/httpAuth.js";
 import * as tokenStore from "./auth/store.js";
 import { LEGACY_USER_KEY } from "./auth/store.js";
-import { generateCodeVerifier, generateCodeChallenge } from "./auth/tokens.js";
-import { hasPendingUpstreamAuth, completeUpstreamAuth } from "./auth/provider.js";
-
-// --- CSRF state + PKCE storage (keyed by state value, expires after 10 min) ---
-interface PendingAuth {
-  codeVerifier: string;
-  createdAt: number;
-}
-const pendingAuths = new Map<string, PendingAuth>();
-
-function cleanupPendingAuths(): void {
-  const tenMinutes = 10 * 60 * 1000;
-  const now = Date.now();
-  for (const [state, pending] of pendingAuths) {
-    if (now - pending.createdAt > tenMinutes) {
-      pendingAuths.delete(state);
-    }
-  }
-}
+import { verifyMcpToken } from "./auth/tokens.js";
+import { completeUpstreamAuth } from "./auth/provider.js";
 
 // --- HTML escaping to prevent XSS ---
 function escapeHtml(str: string): string {
@@ -120,7 +98,10 @@ export function isOAuthConfigured(): boolean {
  * migrated) yet. The store's own load() already handles the "an old
  * pre-per-user file exists" migration automatically and lazily — this is
  * only the remaining case: no file at all yet, first boot, env vars as the
- * seed. Matches the old initTokenFromEnv()'s env-fallback behavior exactly.
+ * seed. This identity is a migration artifact only — nothing can create a
+ * new one interactively now that the shared-secret authorize route is gone;
+ * it exists solely so a pre-existing single-token deploy doesn't lose its
+ * NationBuilder connection outright the moment this ships.
  */
 export function initTokenFromEnv(): void {
   if (tokenStore.getUser(LEGACY_USER_KEY)) return;
@@ -144,17 +125,17 @@ export function getOAuthToken(): string | null {
   return tokenStore.getUserAccessToken(LEGACY_USER_KEY);
 }
 
-// --- NationBuilder token exchange (shared by both authorize flows) --------
+// --- NationBuilder token exchange (used by the Authorization Server's
+// upstream leg — see src/auth/provider.ts's completeUpstreamAuth) ----------
 
 export type NbTokenExchangeResult =
   | { ok: true; accessToken: string; refreshToken: string | null; expiresAt: number; tokenType: string; scope?: string }
   | { ok: false; httpStatus: number; errorCode: string | null };
 
 /**
- * Exchange an authorization code for a NationBuilder token pair. Shared by
- * the legacy flow's callback handling and the Authorization Server's leg-2
- * completion (auth/provider.ts) — there is exactly one way this server
- * talks to NationBuilder's token endpoint, regardless of which flow got a
+ * Exchange an authorization code for a NationBuilder token pair. There is
+ * exactly one way this server talks to NationBuilder's token endpoint —
+ * this function — regardless of which flow (or which future one) got a
  * person here.
  */
 export async function exchangeCodeForNbTokens(code: string, codeVerifier: string): Promise<NbTokenExchangeResult> {
@@ -299,8 +280,7 @@ const REFRESH_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
 /**
  * Report a refresh failure, throttled per-user so one broken connection
  * doesn't suppress the report for every other connected person sharing this
- * module's throttle map (the old module-global REFRESH_THROTTLE_KEY did
- * exactly that). `force` defaults to "this user's healthy -> broken
+ * module's throttle map. `force` defaults to "this user's healthy -> broken
  * transition", read from the store *before* the caller flips it, so the
  * first failure after a healthy period always gets through immediately —
  * even inside a throttle window left open by an earlier, different user's
@@ -445,13 +425,6 @@ export async function refreshUserToken(userKey: string): Promise<boolean> {
   return promise;
 }
 
-/** Force a refresh of the legacy identity (e.g. after a 401). Kept as the
- *  external contract index.ts's HTTP-mode tokenGetter still relies on until
- *  session/user binding lands. */
-export async function forceRefreshToken(): Promise<boolean> {
-  return refreshUserToken(LEGACY_USER_KEY);
-}
-
 const SWEEP_REFRESH_WINDOW_MS = 60 * 60 * 1000; // refresh once inside 60 min of expiry
 const SWEEP_GAP_MS = 250; // spacing between refreshes in one sweep pass
 
@@ -498,72 +471,14 @@ export async function bootstrapToken(): Promise<void> {
   await sweepUserTokens();
 }
 
-/**
- * Gates /oauth/authorize and /oauth/status: either credential accepted by
- * isAuthorized() (MCP_URL_SECRET as a path segment, or an MCP_AUTH_TOKEN
- * Bearer header) unlocks the route. Without one, /oauth/authorize can
- * initiate a flow that replaces the server's working NationBuilder token
- * with whatever any visitor authorizes, and /oauth/status leaks token
- * expiry, store path, and writability — to anyone with the URL.
- *
- * 404, not 401: a wrong path segment shouldn't confirm that a gated route
- * exists at all.
- *
- * This gate — and the route it protects — is the pre-per-user shared flow
- * and is dead code the moment the gate flips to the Authorization Server;
- * kept working as-is until then so there's a single migration point rather
- * than two.
- */
-function requireOauthAuth(req: Request, res: Response, next: NextFunction): void {
-  if (isAuthorized(req, req.params.oauthSecret)) {
-    next();
-    return;
-  }
-  res.status(404).json({ error: "not_found" });
-}
-
 /** Create Express router with OAuth routes */
 export function createOAuthRouter(): Router {
   const router = Router();
 
-  // GET /oauth/:oauthSecret/authorize — the legacy shared flow: redirects to
-  // NationBuilder's consent screen and, on return, sets LEGACY_USER_KEY.
-  router.get("/oauth/:oauthSecret/authorize", requireOauthAuth, (_req, res) => {
-    const { slug, clientId, callbackUrl } = getConfig();
-
-    if (!clientId || !callbackUrl) {
-      res.status(500).json({
-        error: "OAuth not configured. Set NATIONBUILDER_CLIENT_ID and NATIONBUILDER_CLIENT_SECRET env vars.",
-      });
-      return;
-    }
-
-    // Generate CSRF state token
-    const state = randomBytes(24).toString("base64url");
-
-    // Generate PKCE code verifier + challenge (S256)
-    const codeVerifier = generateCodeVerifier();
-    const codeChallenge = generateCodeChallenge(codeVerifier);
-
-    // Store state → verifier mapping (expires after 10 min)
-    cleanupPendingAuths();
-    pendingAuths.set(state, { codeVerifier, createdAt: Date.now() });
-
-    const authorizeUrl = new URL(`${getNbOAuthBaseUrl(slug)}/oauth/authorize`);
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("client_id", clientId);
-    authorizeUrl.searchParams.set("redirect_uri", callbackUrl);
-    authorizeUrl.searchParams.set("state", state);
-    authorizeUrl.searchParams.set("code_challenge", codeChallenge);
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
-
-    res.redirect(authorizeUrl.toString());
-  });
-
-  // GET /oauth/callback — NationBuilder's registered redirect target for
-  // BOTH authorize flows (see the module comment at the top of this file).
-  // The path can never change without re-registering it with NationBuilder,
-  // so both flows must land here and this route dispatches between them.
+  // GET /oauth/callback — NationBuilder's registered redirect target. This
+  // path can never change without re-registering it with NationBuilder, so
+  // it stays fixed here while everything upstream of it (constructing the
+  // authorize URL a person is sent to) lives in src/auth/provider.ts.
   router.get("/oauth/callback", async (req, res) => {
     const code = req.query.code as string | undefined;
     const error = req.query.error as string | undefined;
@@ -620,93 +535,49 @@ export function createOAuthRouter(): Router {
       return;
     }
 
-    // --- Dispatch: does `state` belong to the Authorization Server's own
-    // upstream leg, or the legacy shared flow? Each generates its own
-    // random state into its own map, so this is unambiguous.
-    if (hasPendingUpstreamAuth(state)) {
-      const result = await completeUpstreamAuth(state, code);
-      if ("redirectTo" in result) {
-        res.redirect(302, result.redirectTo);
-      } else {
-        res.status(400).send(errorPage("Authorization Failed", `Could not complete sign-in: ${escapeHtml(result.error)}. Please try connecting again.`));
-      }
-      return;
+    // completeUpstreamAuth() owns the rest: exchanging the code, the
+    // identity probe, persisting that person's NationBuilder tokens, and
+    // minting the code claude.ai redeems at /token. An unknown/expired
+    // `state` (nothing pending, or already consumed) comes back as an
+    // error result here rather than throwing — never a 500.
+    const result = await completeUpstreamAuth(state, code);
+    if ("redirectTo" in result) {
+      res.redirect(302, result.redirectTo);
+    } else {
+      res.status(400).send(errorPage("Authorization Failed", `Could not complete sign-in: ${escapeHtml(result.error)}. Please try connecting again.`));
     }
-
-    // --- Legacy shared flow ---
-    if (!pendingAuths.has(state)) {
-      // Never echo `state` itself — treat it as opaque. Public and
-      // unauthenticated endpoint, so throttle this too.
-      reportErrorThrottled({
-        category: "auth_error",
-        message: "oauth_callback: missing or expired CSRF state",
-        context: { state_length: state.length, pending_auths: pendingAuths.size },
-        throttleKey: "oauth_callback_bad_state",
-        throttleMs: 60 * 60 * 1000,
-      });
-      res.status(400).send(errorPage("Invalid State", "OAuth state parameter is missing or invalid. This may indicate a CSRF attack or an expired authorization. Please try again."));
-      return;
-    }
-
-    // Retrieve and consume the pending auth (one-time use)
-    const pendingAuth = pendingAuths.get(state)!;
-    pendingAuths.delete(state);
-
-    const result = await exchangeCodeForNbTokens(code, pendingAuth.codeVerifier);
-    if (!result.ok) {
-      res.status(500).send(errorPage("Token Exchange Failed", `HTTP ${result.httpStatus}`));
-      return;
-    }
-
-    tokenStore.setUserTokens(LEGACY_USER_KEY, {
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
-      expiresAt: result.expiresAt,
-    });
-
-    const expiryInfo = "Token expires in about 24 hours (auto-refresh enabled).";
-
-    // Say so on the page rather than only in the logs — whoever just clicked
-    // through is the one person positioned to fix a bad volume mount, and
-    // otherwise they'd only find out at the next restart.
-    const storeStatus = tokenStore.getStoreStatus();
-    const persistenceNote = storeStatus.writable
-      ? `<p style="color:#666;font-size:14px">Tokens saved to persistent storage — they will survive restarts.</p>`
-      : `<p style="color:#b00;font-size:14px"><strong>Warning:</strong> tokens could NOT be saved to persistent storage. ` +
-        `They are in memory only, so the next restart will require re-authorizing here again. ` +
-        `Check that a volume is mounted on this service (see the deploy logs for details).</p>`;
-
-    console.error(`OAuth token obtained for ${LEGACY_USER_KEY}. Type: ${result.tokenType}, Scope: ${result.scope ?? "default"}, Refresh: ${result.refreshToken ? "yes" : "no"}`);
-
-    res.send(`
-      <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
-        <h2>Authorization Successful</h2>
-        <p>NationBuilder OAuth token obtained.</p>
-        <p style="color:#666;font-size:14px">${expiryInfo}</p>
-        ${persistenceNote}
-        <p style="color:#666;font-size:14px">You can close this window. The MCP server is now using your OAuth credentials.</p>
-      </body></html>
-    `);
   });
 
-  // GET /oauth/:oauthSecret/status — check current auth state
-  router.get("/oauth/:oauthSecret/status", requireOauthAuth, (_req, res) => {
-    const oauthConfigured = isOAuthConfigured();
-    const legacyUser = tokenStore.getUser(LEGACY_USER_KEY);
-    const hasOAuthToken = !!legacyUser && !legacyUser.revoked;
-    const hasStaticToken = !!process.env.NATIONBUILDER_ACCESS_TOKEN;
-
-    res.json({
-      oauthConfigured,
-      hasOAuthToken,
-      hasStaticToken,
-      activeMethod: hasOAuthToken ? "oauth" : hasStaticToken ? "static_token" : "none",
-      tokenExpiry: legacyUser?.expiresAt ? new Date(legacyUser.expiresAt).toISOString() : null,
-      hasRefreshToken: !!legacyUser?.refreshToken,
-      // Check this BEFORE authorizing: if writable is false, the token you're
-      // about to obtain won't survive the next restart.
+  // GET /oauth/status — public but tiered: the baseline body has no secrets
+  // (never a live NationBuilder token, never anyone's label). Present a
+  // valid MCP bearer (the same one claude.ai holds for your connector) and
+  // the response additionally includes your own record.
+  router.get("/oauth/status", (req, res) => {
+    const summaries = tokenStore.listUsersSummary();
+    const body: Record<string, unknown> = {
+      oauthConfigured: isOAuthConfigured(),
+      userCount: summaries.length,
+      needsReauthCount: summaries.filter((u) => u.needsReauth).length,
       tokenStore: tokenStore.getStoreStatus(),
-    });
+    };
+
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+      const payload = verifyMcpToken(authHeader.slice(7), "access");
+      const user = payload ? tokenStore.getUser(payload.sub) : null;
+      if (user) {
+        body.you = {
+          label: user.label,
+          expiresAt: user.expiresAt ? new Date(user.expiresAt).toISOString() : null,
+          hasRefreshToken: !!user.refreshToken,
+          refreshHealthy: user.refreshHealthy,
+          revoked: user.revoked,
+          needsReauth: user.needsReauth,
+        };
+      }
+    }
+
+    res.json(body);
   });
 
   return router;

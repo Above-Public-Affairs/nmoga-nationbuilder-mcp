@@ -24,15 +24,15 @@
  *      entirely independent of NationBuilder's own 24h token lifecycle.
  *
  * This module intentionally has a two-way relationship with ../oauth.ts:
- * oauth.ts's /oauth/callback route calls hasPendingUpstreamAuth()/
- * completeUpstreamAuth() here (since NationBuilder's registered callback
- * path can't be duplicated for a second flow), and this module calls
- * oauth.ts's getConfig()/exchangeCodeForNbTokens()/probeNationBuilderIdentity()
- * (there is exactly one way this server talks to NationBuilder's token
- * endpoint). Node ESM handles this cycle safely as long as neither side
- * calls into the other at module-evaluation time — every call here happens
- * inside a request handler, well after both modules have finished loading.
- * Do not "fix" this into a bigger shared module without cause.
+ * oauth.ts's /oauth/callback route calls completeUpstreamAuth() here (since
+ * NationBuilder's registered callback path can't be duplicated for a second
+ * route), and this module calls oauth.ts's getConfig()/exchangeCodeForNbTokens()/
+ * probeNationBuilderIdentity() (there is exactly one way this server talks
+ * to NationBuilder's token endpoint). Node ESM handles this cycle safely as
+ * long as neither side calls into the other at module-evaluation time —
+ * every call here happens inside a request handler, well after both modules
+ * have finished loading. Do not "fix" this into a bigger shared module
+ * without cause.
  */
 
 import { randomBytes } from "crypto";
@@ -162,11 +162,6 @@ function cleanupPendingUpstreamAuths(): void {
   }
 }
 
-/** Used by oauth.ts's /oauth/callback to decide which flow a `state` belongs to. */
-export function hasPendingUpstreamAuth(state: string): boolean {
-  return pendingUpstreamAuths.has(state);
-}
-
 // --- Leg 3: our own short-lived authorization code, keyed by mcpCode -------
 
 interface McpAuthCode {
@@ -190,10 +185,12 @@ function cleanupMcpAuthCodes(): void {
 /**
  * Complete the upstream (NationBuilder) leg of the flow: exchange the code,
  * probe for identity, persist that person's NationBuilder tokens, and mint
- * our own authorization code for claude.ai to redeem at /token. Called from
- * oauth.ts's /oauth/callback once it's determined `state` belongs to this
- * flow (see hasPendingUpstreamAuth above) — NationBuilder's registered
- * callback path can't be duplicated for a second route.
+ * our own authorization code for claude.ai to redeem at /token. Called
+ * directly from oauth.ts's /oauth/callback — NationBuilder's registered
+ * callback path can't be duplicated for a second route, so that file owns
+ * the fixed route and delegates the actual completion here. An unknown or
+ * already-consumed `nbState` (nothing pending) comes back as an `error`
+ * result, never a throw.
  */
 export async function completeUpstreamAuth(
   nbState: string,

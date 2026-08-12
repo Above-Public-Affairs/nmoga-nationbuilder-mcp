@@ -13,22 +13,21 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "crypto";
 import type { Server } from "node:http";
 import express from "express";
 import type { Request, Response } from "express";
-import { createNationBuilderClient } from "./client/nationbuilder.js";
+import { createNationBuilderClient, NO_TOKEN_PREFIX } from "./client/nationbuilder.js";
 import type { NationBuilderClientOptions } from "./client/nationbuilder.js";
-import { bootstrapToken, createOAuthRouter, forceRefreshToken, getOAuthToken, initTokenFromEnv, isOAuthConfigured, sweepUserTokens } from "./oauth.js";
-import { getStoreStatus } from "./auth/store.js";
+import { bootstrapToken, createOAuthRouter, getOAuthToken, initTokenFromEnv, isOAuthConfigured, refreshUserToken, sweepUserTokens } from "./oauth.js";
+import { getStoreStatus, getUserAccessToken, userTag as storeUserTag } from "./auth/store.js";
 import { createNationBuilderOAuthProvider } from "./auth/provider.js";
 import { wellKnownAliasRouter, mcpCorsMiddleware } from "./auth/wellKnown.js";
 import { publicBaseUrl } from "./auth/tokens.js";
-import { mcpAuthRouter, createOAuthMetadata } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { mcpAuthRouter, createOAuthMetadata, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { reportError, reportErrorThrottled, reportAndFlush, safeErr } from "./utils/errorReporter.js";
-import { getMcpUrlSecret, isAuthorized } from "./utils/httpAuth.js";
 import { registerSignupTools } from "./tools/signups.js";
 import { registerTagTools } from "./tools/tags.js";
 import { registerContactTools } from "./tools/contacts.js";
@@ -190,9 +189,10 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
   // redirect with an error if NationBuilder OAuth isn't configured, rather
   // than this needing a conditional mount.
   //
-  // NOT YET the thing that gates /mcp — that's a later change, once this has
-  // been exercised end-to-end. Today's /mcp gate (MCP_URL_SECRET/
-  // MCP_AUTH_TOKEN, below) is unaffected by mounting this.
+  // This IS what gates /mcp below (via requireBearerAuth) — the
+  // MCP_URL_SECRET/MCP_AUTH_TOKEN shared-secret gate and the legacy SSE
+  // transport are gone; every caller now completes a real NationBuilder
+  // login through this Authorization Server.
   app.use(mcpCorsMiddleware);
   const nbOAuthProvider = createNationBuilderOAuthProvider();
   const issuerUrl = new URL(publicBaseUrl());
@@ -219,57 +219,28 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
       resourceName: "NMOGA NationBuilder",
     })
   );
-
-  // Token getter: prefer OAuth token, fall back to static token
-  const getToken = (): string => {
-    const oauthToken = getOAuthToken();
-    if (oauthToken) return oauthToken;
-    if (staticToken) return staticToken;
-    throw new Error("No access token available. Complete OAuth flow at /oauth/authorize or set NATIONBUILDER_ACCESS_TOKEN.");
-  };
-
-  // Every HTTP entry point (/mcp, /sse, /oauth/authorize, /oauth/status) is
-  // gated by isAuthorized() — MCP_URL_SECRET as a URL path segment (for
-  // claude.ai org connectors, which can't send custom headers) or an
-  // MCP_AUTH_TOKEN Bearer header (for mcp-remote/curl/local dev). With
-  // neither set, this server is unreachable by anyone — say so loudly at
-  // boot rather than let it surface as a silent connector outage.
-  if (!getMcpUrlSecret() && !process.env.MCP_AUTH_TOKEN) {
-    console.error(
-      "CRITICAL: neither MCP_URL_SECRET nor MCP_AUTH_TOKEN is set. /mcp, /sse, and " +
-      "/oauth/authorize|status will reject every request. Set MCP_URL_SECRET (a long " +
-      "random path segment) and point the claude.ai org connector at /mcp/<that value>."
-    );
-    reportError({
-      category: "auth_error",
-      message: "startup: no MCP_URL_SECRET and no MCP_AUTH_TOKEN — HTTP endpoints are unreachable",
-    });
-  } else if (!getMcpUrlSecret()) {
-    console.error(
-      "WARNING: MCP_URL_SECRET is not set — the secret-path routes (/mcp/<secret>, " +
-      "/sse/<secret>) are disabled. Only Bearer-authenticated requests to the bare " +
-      "routes will work. The claude.ai org connector cannot send a Bearer header, so " +
-      "it needs MCP_URL_SECRET set and its connector URL pointed at /mcp/<that value>."
-    );
-  } else if (getMcpUrlSecret()!.length < 16) {
-    console.error(
-      "WARNING: MCP_URL_SECRET is shorter than 16 characters — use a longer random " +
-      "value; a short one is guessable and defeats the point of a secret path."
-    );
-  }
+  const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(resourceServerUrl);
 
   // Track active transports by session ID (Streamable HTTP)
   const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
   // Last time each session was used, so idle sessions can be reaped
   const sessionLastSeen = new Map<string, number>();
-  // Track active SSE transports (legacy)
-  const sseTransports = new Map<string, SSEServerTransport>();
+  // Which userKey each live session belongs to — the session's McpServer
+  // (and the NationBuilder client inside it) was built once, at session
+  // creation, bound to one person's tokenGetter. Every later request on
+  // that session id is re-checked against this map (see handleMcpRequest)
+  // so a second, differently-authenticated caller who somehow obtains the
+  // session id can't ride it to act as its original owner.
+  const sessionUser = new Map<string, string>();
 
   // Reject new Streamable HTTP sessions beyond this — cheap insurance
   // against unbounded memory growth even with auth in front of it. Each
   // session holds a full McpServer + transport in memory for up to
   // SESSION_IDLE_MS.
   const MAX_CONCURRENT_SESSIONS = 100;
+  // Per-person cap on top of the global one, so a single runaway or buggy
+  // client can't consume the whole pool and 503 everyone else.
+  const MAX_SESSIONS_PER_USER = 10;
 
   // Sessions live in memory only. Clients rarely send DELETE (Claude's connector
   // never does), so onclose alone leaves entries — and their McpServer instances —
@@ -280,6 +251,7 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     const transport = streamableTransports.get(sessionId);
     streamableTransports.delete(sessionId);
     sessionLastSeen.delete(sessionId);
+    sessionUser.delete(sessionId);
     if (transport) {
       console.error(`Dropping session ${sessionId} (${reason})`);
       void Promise.resolve(transport.close()).catch(() => {});
@@ -293,18 +265,14 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     }
   }, 5 * 60 * 1000);
 
-  // Mount OAuth routes. /oauth/authorize and /oauth/status are gated (see
-  // requireOauthAuth in oauth.ts) — same MCP_URL_SECRET-path-or-Bearer model
-  // as /mcp below. /oauth/callback is deliberately left unauthenticated and
+  // Mount OAuth routes. /oauth/callback is deliberately unauthenticated and
   // at its existing path: it's the redirect target NationBuilder itself
   // calls, protected instead by the CSRF state check, and moving it would
   // require updating the callback URL registered with NationBuilder.
+  // /oauth/status is public but tiered — see oauth.ts.
   if (isOAuthConfigured()) {
     app.use(createOAuthRouter());
-    console.error(
-      "OAuth routes enabled: /oauth/<secret>/authorize, /oauth/callback (unauthenticated), " +
-      "/oauth/<secret>/status — secret is MCP_URL_SECRET, or use a Bearer MCP_AUTH_TOKEN"
-    );
+    console.error("OAuth routes enabled: /oauth/callback (unauthenticated), /oauth/status (tiered)");
   }
 
   // Health check — deliberately the one route left unauthenticated, so
@@ -318,247 +286,188 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     });
   });
 
-  // Shared handler for both the secret-path and bare Streamable HTTP
-  // routes below — auth has already been checked by the caller.
-  async function handleMcpRequest(req: Request, res: Response): Promise<void> {
-    console.error(`Streamable HTTP ${req.method} from ${req.ip}`);
-
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-    try {
-      if (sessionId && streamableTransports.has(sessionId)) {
-        // Existing session — route to its transport
-        sessionLastSeen.set(sessionId, Date.now());
-        // Passing req.body explicitly (undefined today, since nothing here
-        // mounts a body parser) is defence-in-depth: the SDK reads the raw
-        // request stream itself only when the third arg is omitted, so once
-        // any route ever adds a body parser upstream of this one, an
-        // omitted third arg here would hang waiting on a stream that parser
-        // already drained.
-        await streamableTransports.get(sessionId)!.handleRequest(req, res, req.body);
-      } else if (sessionId) {
-        // Session ID we don't recognise — the server restarted, or we reaped it.
-        //
-        // This MUST be 404, not 400. The Streamable HTTP spec says a client that
-        // gets 404 for its session ID starts a fresh session with a new
-        // initialize; a 400 is instead read as a fatal protocol error, so the
-        // client gives up and the connector goes dark with zero tools loaded
-        // until someone reconnects it by hand. That was the "connection dropped
-        // unexpectedly / no NationBuilder tools" report.
-        console.error(`Unknown session ${sessionId} — telling client to re-initialize`);
-        res.status(404).json({
-          jsonrpc: "2.0",
-          error: {
-            code: -32001,
-            message: "Session not found or expired. Start a new session with an initialize request.",
-          },
-          id: null,
-        });
-      } else if (req.method === "POST") {
-        // Reject before spending a McpServer + transport on it — cheap
-        // insurance against unbounded memory growth even with auth in front.
-        if (streamableTransports.size >= MAX_CONCURRENT_SESSIONS) {
-          console.error(
-            `Rejecting new session — at capacity (${streamableTransports.size}/${MAX_CONCURRENT_SESSIONS})`
-          );
-          res.status(503).json({
-            error: "server_busy",
-            message: `Server is at its concurrent session limit (${MAX_CONCURRENT_SESSIONS}). Try again shortly.`,
-          });
-          return;
-        }
-
-        // New session — first POST has no session ID (the initialize request)
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-        });
-
-        // Set before handleRequest, not after: if the client aborts during
-        // the initialize round-trip, onclose can fire while handleRequest is
-        // still pending. Setting it only after handleRequest resolves would
-        // leave a dead transport registered forever with nothing to clean it
-        // up, since onclose already fired without a listener attached.
-        transport.onclose = () => {
-          console.error(`Streamable HTTP session closed: ${transport.sessionId}`);
-          if (transport.sessionId) {
-            streamableTransports.delete(transport.sessionId);
-            sessionLastSeen.delete(transport.sessionId);
-          }
-        };
-
-        const server = createServer(slug, getToken, { onUnauthorized: forceRefreshToken });
-        await server.connect(transport);
-
-        // handleRequest processes the initialize and sets the session ID
-        // in the response header automatically
-        await transport.handleRequest(req, res, req.body);
-
-        // After handleRequest, transport.sessionId is now set
-        if (transport.sessionId) {
-          console.error(`New Streamable HTTP session: ${transport.sessionId}`);
-          streamableTransports.set(transport.sessionId, transport);
-          sessionLastSeen.set(transport.sessionId, Date.now());
-        }
-      } else {
-        // GET or DELETE with no session ID at all — nothing to attach to.
-        // (DELETE for a live session is handled by the transport above, which
-        // terminates it and fires onclose.)
-        res.status(400).json({ error: "Missing Mcp-Session-Id header" });
+  /** Per-session tokenGetter: resolves this specific person's NationBuilder
+   *  access token fresh on every call (never captures a token value), so a
+   *  revoked/deleted user record takes effect on that person's very next
+   *  request with no per-tool changes needed — every tool only ever goes
+   *  through the shared NationBuilderClient, which already re-invokes this
+   *  closure per request and per retry. */
+  function makeUserTokenGetter(userKey: string): () => string {
+    return () => {
+      const token = getUserAccessToken(userKey);
+      if (!token) {
+        // NO_TOKEN_PREFIX is a load-bearing contract with the API client's
+        // retry loop (src/client/nationbuilder.ts) — it fast-fails on this
+        // exact prefix instead of burning 3 retries on a condition that
+        // can't self-resolve. Never reword the opening words.
+        throw new Error(
+          `${NO_TOKEN_PREFIX} for this connector. Reconnect it in claude.ai: Settings → ` +
+          `Connectors → remove and re-add this connector, then complete the NationBuilder login.`
+        );
       }
-    } catch (err) {
-      // Express 4 does not catch async rejections: without this, one
-      // rejected await here reaches unhandledRejection and takes the whole
-      // server down for every user, not just this request.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error("/mcp handler error:", safeErr(err));
-      reportError({
-        category: "tool_error",
-        message: `mcp_endpoint: ${message}`,
-        rawError: err,
-        context: {
-          http_method: req.method,
-          has_session_id: !!sessionId,
-          sessions_open: streamableTransports.size,
-        },
-      });
-      if (!res.headersSent) res.status(500).json({ error: "server_error" });
-      else if (!res.writableEnded) res.end();
-    }
+      return token;
+    };
   }
 
-  // Streamable HTTP, secret-path route — the URL itself is the credential.
-  // This is what the claude.ai org connector must be configured to use,
-  // since it cannot send custom headers. Wrong secret -> 404, not 401: it
-  // shouldn't confirm that a gated route exists at all.
-  app.all("/mcp/:mcpSecret", async (req, res) => {
-    if (!isAuthorized(req, req.params.mcpSecret)) {
-      res.status(404).json({ error: "not_found" });
-      return;
+  // Streamable HTTP endpoint. requireBearerAuth validates the MCP access
+  // token (src/auth/provider.ts's verifyAccessToken) and populates
+  // req.auth.extra.userKey — everything downstream is scoped to that one
+  // person's NationBuilder identity.
+  app.all(
+    "/mcp",
+    requireBearerAuth({ verifier: nbOAuthProvider, requiredScopes: [], resourceMetadataUrl }),
+    async (req, res) => {
+      const userKey = req.auth?.extra?.userKey as string | undefined;
+      if (!userKey) {
+        // Should be unreachable: requireBearerAuth only calls next() after
+        // verifyAccessToken() resolves, which always sets extra.userKey.
+        console.error("/mcp: requireBearerAuth passed a request with no userKey — this is a bug");
+        res.status(500).json({ error: "server_error" });
+        return;
+      }
+
+      console.error(`Streamable HTTP ${req.method} from ${req.ip} (user ${storeUserTag(userKey)})`);
+
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      try {
+        if (sessionId && streamableTransports.has(sessionId)) {
+          // Re-verify session ownership on every request, not only at
+          // creation — see the sessionUser comment above for why.
+          const owner = sessionUser.get(sessionId);
+          if (owner !== userKey) {
+            console.error(`Session owner mismatch for ${sessionId} — rejecting`);
+            reportError({
+              category: "auth_error",
+              message: "mcp: session owner mismatch",
+              context: {
+                session_owner_tag: owner ? storeUserTag(owner) : null,
+                caller_tag: storeUserTag(userKey),
+              },
+            });
+            res.status(403).json({ error: "invalid_session_owner" });
+            return;
+          }
+
+          sessionLastSeen.set(sessionId, Date.now());
+          // Passing req.body explicitly (undefined today, since nothing
+          // here mounts a body parser on /mcp) is defence-in-depth: the SDK
+          // reads the raw request stream itself only when the third arg is
+          // omitted, so once any route ever adds a body parser upstream of
+          // this one, an omitted third arg here would hang waiting on a
+          // stream that parser already drained.
+          await streamableTransports.get(sessionId)!.handleRequest(req, res, req.body);
+        } else if (sessionId) {
+          // Session ID we don't recognise — the server restarted, or we reaped it.
+          //
+          // This MUST be 404, not 400. The Streamable HTTP spec says a client that
+          // gets 404 for its session ID starts a fresh session with a new
+          // initialize; a 400 is instead read as a fatal protocol error, so the
+          // client gives up and the connector goes dark with zero tools loaded
+          // until someone reconnects it by hand. That was the "connection dropped
+          // unexpectedly / no NationBuilder tools" report.
+          console.error(`Unknown session ${sessionId} — telling client to re-initialize`);
+          res.status(404).json({
+            jsonrpc: "2.0",
+            error: {
+              code: -32001,
+              message: "Session not found or expired. Start a new session with an initialize request.",
+            },
+            id: null,
+          });
+        } else if (req.method === "POST") {
+          // Reject before spending a McpServer + transport on it — cheap
+          // insurance against unbounded memory growth even with auth in front.
+          if (streamableTransports.size >= MAX_CONCURRENT_SESSIONS) {
+            console.error(
+              `Rejecting new session — at capacity (${streamableTransports.size}/${MAX_CONCURRENT_SESSIONS})`
+            );
+            res.status(503).json({
+              error: "server_busy",
+              message: `Server is at its concurrent session limit (${MAX_CONCURRENT_SESSIONS}). Try again shortly.`,
+            });
+            return;
+          }
+
+          let sessionsForThisUser = 0;
+          for (const owner of sessionUser.values()) {
+            if (owner === userKey) sessionsForThisUser++;
+          }
+          if (sessionsForThisUser >= MAX_SESSIONS_PER_USER) {
+            console.error(
+              `Rejecting new session for ${storeUserTag(userKey)} — at per-user limit (${sessionsForThisUser}/${MAX_SESSIONS_PER_USER})`
+            );
+            res.status(503).json({
+              error: "server_busy",
+              message: `You have reached the concurrent session limit (${MAX_SESSIONS_PER_USER}) for this connector. Close another session and try again.`,
+            });
+            return;
+          }
+
+          // New session — first POST has no session ID (the initialize request)
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+          });
+
+          // Set before handleRequest, not after: if the client aborts during
+          // the initialize round-trip, onclose can fire while handleRequest is
+          // still pending. Setting it only after handleRequest resolves would
+          // leave a dead transport registered forever with nothing to clean it
+          // up, since onclose already fired without a listener attached.
+          transport.onclose = () => {
+            console.error(`Streamable HTTP session closed: ${transport.sessionId}`);
+            if (transport.sessionId) {
+              streamableTransports.delete(transport.sessionId);
+              sessionLastSeen.delete(transport.sessionId);
+              sessionUser.delete(transport.sessionId);
+            }
+          };
+
+          const server = createServer(slug, makeUserTokenGetter(userKey), {
+            onUnauthorized: () => refreshUserToken(userKey),
+            userTag: storeUserTag(userKey),
+          });
+          await server.connect(transport);
+
+          // handleRequest processes the initialize and sets the session ID
+          // in the response header automatically
+          await transport.handleRequest(req, res, req.body);
+
+          // After handleRequest, transport.sessionId is now set
+          if (transport.sessionId) {
+            console.error(`New Streamable HTTP session: ${transport.sessionId} (user ${storeUserTag(userKey)})`);
+            streamableTransports.set(transport.sessionId, transport);
+            sessionLastSeen.set(transport.sessionId, Date.now());
+            sessionUser.set(transport.sessionId, userKey);
+          }
+        } else {
+          // GET or DELETE with no session ID at all — nothing to attach to.
+          // (DELETE for a live session is handled by the transport above, which
+          // terminates it and fires onclose.)
+          res.status(400).json({ error: "Missing Mcp-Session-Id header" });
+        }
+      } catch (err) {
+        // Express 4 does not catch async rejections: without this, one
+        // rejected await here reaches unhandledRejection and takes the whole
+        // server down for every user, not just this request.
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("/mcp handler error:", safeErr(err));
+        reportError({
+          category: "tool_error",
+          message: `mcp_endpoint: ${message}`,
+          rawError: err,
+          context: {
+            http_method: req.method,
+            has_session_id: !!sessionId,
+            sessions_open: streamableTransports.size,
+            user_tag: storeUserTag(userKey),
+          },
+        });
+        if (!res.headersSent) res.status(500).json({ error: "server_error" });
+        else if (!res.writableEnded) res.end();
+      }
     }
-    await handleMcpRequest(req, res);
-  });
-
-  // Streamable HTTP, bare route — for callers that can send headers
-  // (mcp-remote, curl, local dev). Requires a Bearer MCP_AUTH_TOKEN; never
-  // establishes a session without one.
-  app.all("/mcp", async (req, res) => {
-    if (!isAuthorized(req)) {
-      res.status(401).json({
-        error: "unauthorized",
-        message: "Provide Authorization: Bearer <MCP_AUTH_TOKEN>, or use the secret-path URL.",
-      });
-      return;
-    }
-    await handleMcpRequest(req, res);
-  });
-
-  // Shared handler for the legacy SSE connect — both the secret-path and
-  // bare routes below construct the transport with the messages endpoint
-  // that matches how they were reached, so the client's follow-up POSTs
-  // land on an equally-gated path.
-  async function handleSseConnect(req: Request, res: Response, messagesPath: string): Promise<void> {
-    console.error(`Legacy SSE connection from ${req.ip}`);
-
-    const transport = new SSEServerTransport(messagesPath, res);
-    const sessionId = transport.sessionId;
-    sseTransports.set(sessionId, transport);
-
-    res.on("close", () => {
-      console.error(`SSE connection closed: ${sessionId}`);
-      sseTransports.delete(sessionId);
-    });
-
-    try {
-      const server = createServer(slug, getToken, { onUnauthorized: forceRefreshToken });
-      await server.connect(transport);
-    } catch (err) {
-      // server.connect() writes the SSE response head as part of
-      // establishing the stream, so by the time this can throw, headers are
-      // almost always already sent — never attempt a JSON 500 here.
-      console.error("/sse handler error:", safeErr(err));
-      reportError({
-        category: "tool_error",
-        message: `sse_endpoint: ${err instanceof Error ? err.message : String(err)}`,
-        rawError: err,
-      });
-      // connect() failed, so this entry never got a live stream behind it —
-      // don't wait on res's "close" event to clean it up.
-      sseTransports.delete(sessionId);
-      if (!res.headersSent) res.status(500).json({ error: "server_error" });
-      else if (!res.writableEnded) res.end();
-    }
-  }
-
-  // Shared handler for the legacy /messages POST — auth has already been
-  // checked by the caller.
-  async function handleSseMessage(req: Request, res: Response): Promise<void> {
-    const sessionId = req.query.sessionId as string;
-    const transport = sseTransports.get(sessionId);
-
-    if (!transport) {
-      res.status(404).json({ error: "Session not found" });
-      return;
-    }
-
-    try {
-      await transport.handlePostMessage(req, res, req.body);
-    } catch (err) {
-      // The SDK writes a 500 and ends the response before throwing here (its
-      // SSE stream is already gone) — headers are always sent by this point,
-      // so a second res.status(500).json(...) would throw
-      // ERR_HTTP_HEADERS_SENT and crash the server a second time from
-      // inside this very catch.
-      console.error("/messages handler error:", safeErr(err));
-      reportError({
-        category: "tool_error",
-        message: `messages_endpoint: ${err instanceof Error ? err.message : String(err)}`,
-        rawError: err,
-      });
-      // The throw means the transport's stream is gone — drop the now-stale
-      // entry so a retried POST to this session doesn't hit the same dead end.
-      sseTransports.delete(sessionId);
-      if (!res.headersSent) res.status(500).json({ error: "server_error" });
-      else if (!res.writableEnded) res.end();
-    }
-  }
-
-  // Legacy SSE, secret-path routes — same URL-is-the-credential model as /mcp.
-  app.get("/sse/:sseSecret", async (req, res) => {
-    if (!isAuthorized(req, req.params.sseSecret)) {
-      res.status(404).json({ error: "not_found" });
-      return;
-    }
-    await handleSseConnect(req, res, `/sse/${req.params.sseSecret}/messages`);
-  });
-
-  app.post("/sse/:sseSecret/messages", async (req, res) => {
-    if (!isAuthorized(req, req.params.sseSecret)) {
-      res.status(404).json({ error: "not_found" });
-      return;
-    }
-    await handleSseMessage(req, res);
-  });
-
-  // Legacy SSE, bare routes — for header-capable callers (mcp-remote, curl,
-  // local dev). Requires a Bearer MCP_AUTH_TOKEN.
-  app.get("/sse", async (req, res) => {
-    if (!isAuthorized(req)) {
-      res.status(401).json({
-        error: "unauthorized",
-        message: "Provide Authorization: Bearer <MCP_AUTH_TOKEN>, or use the secret-path URL.",
-      });
-      return;
-    }
-    await handleSseConnect(req, res, "/messages");
-  });
-
-  app.post("/messages", async (req, res) => {
-    if (!isAuthorized(req)) {
-      res.status(401).json({ error: "unauthorized" });
-      return;
-    }
-    await handleSseMessage(req, res);
-  });
+  );
 
   // Sweep every connected user's NationBuilder token periodically (every 15
   // minutes — was 30, halved since this now walks a whole user list
@@ -580,26 +489,16 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
 
   httpServer = app.listen(port, () => {
     console.error(`NMOGA NationBuilder MCP server listening on port ${port}`);
-    // Never print MCP_URL_SECRET's value — these lines say where the gated
-    // routes live, not what unlocks them. See the MCP_URL_SECRET/
-    // MCP_AUTH_TOKEN warnings logged above for whether anything can reach them.
-    console.error(`Streamable HTTP (secret path): http://localhost:${port}/mcp/<MCP_URL_SECRET>`);
-    console.error(`Streamable HTTP (bare, Bearer-gated): http://localhost:${port}/mcp`);
-    console.error(`Legacy SSE (secret path): http://localhost:${port}/sse/<MCP_URL_SECRET>`);
-    console.error(`Legacy SSE (bare, Bearer-gated): http://localhost:${port}/sse`);
+    console.error(`Streamable HTTP: http://localhost:${port}/mcp (requires a per-user NationBuilder OAuth token)`);
     console.error(`Health check: http://localhost:${port}/health`);
     if (isOAuthConfigured()) {
-      console.error(`OAuth (gated): http://localhost:${port}/oauth/<MCP_URL_SECRET>/authorize`);
-    }
-    // Live, but not yet load-bearing: /mcp still gates on MCP_URL_SECRET/
-    // MCP_AUTH_TOKEN above, not on tokens issued here. See index.ts's
-    // mcpAuthRouter mount comment.
-    {
       const issuerBase = issuerUrl.href.replace(/\/+$/, "");
       console.error(
-        `Per-user Authorization Server mounted (not yet gating /mcp): ` +
-        `${issuerBase}/authorize, ${issuerBase}/token, ${issuerBase}/.well-known/oauth-authorization-server`
+        `Authorization Server: ${issuerBase}/authorize, ${issuerBase}/token, ` +
+        `${issuerBase}/.well-known/oauth-authorization-server (this is what gates /mcp — ` +
+        `point the claude.ai connector at the bare /mcp URL; it drives the OAuth flow itself)`
       );
+      console.error(`OAuth status: http://localhost:${port}/oauth/status`);
     }
 
     // State the persistence situation at boot. A missing volume otherwise only
