@@ -1,5 +1,22 @@
 # Changelog
 
+## [2026-08-12] — HTTP endpoints authenticated (URGENT security fix)
+
+A code review the same day found `/mcp` and `/sse` were completely unauthenticated in production: anyone with the URL got all 47 tools running with the org's OAuth token — full member PII (names, emails, phones, addresses, donations, support levels) plus write tools (`update_person`, `remove_tags_from_person`, list removals). `MCP_AUTH_TOKEN` was already set in Railway env but nothing in `src/` read it. `/oauth/authorize` and `/oauth/status` were equally open: any visitor could view token expiry/store-path/writability, or initiate an OAuth flow that — completed with any NationBuilder login on the nation — replaces the server's working token.
+
+### Fixed
+- **`/mcp` and `/sse` now require a credential.** claude.ai org connectors cannot send custom headers, so a header-only gate would have broken the connector — the fix adds a secret-path route (`/mcp/<MCP_URL_SECRET>`, `/sse/<MCP_URL_SECRET>`) where the URL itself is the credential, alongside the existing bare `/mcp`/`/sse` paths which now require a valid `Authorization: Bearer <MCP_AUTH_TOKEN>` header (for mcp-remote/curl/local dev). Either credential is accepted on either route. A wrong secret segment returns 404 (not 401 — it shouldn't confirm a gated route exists at all); the bare routes without a valid Bearer return 401 and never establish a session. The legacy `/messages` POST endpoint got the same treatment, mirroring whichever path its `/sse` connection was reached through.
+- **`/oauth/authorize` and `/oauth/status` now require the same credential** (`MCP_URL_SECRET` as a path segment, or a Bearer `MCP_AUTH_TOKEN`) — see `requireOauthAuth` in `src/oauth.ts`. `/oauth/callback` is deliberately left at its existing unauthenticated path: it's the redirect target NationBuilder itself calls, already protected by the CSRF `state` check, and moving it would require re-registering the callback URL with NationBuilder.
+- **Server now warns loudly at boot** if neither `MCP_URL_SECRET` nor `MCP_AUTH_TOKEN` is configured (every HTTP route would reject every request) or if `MCP_URL_SECRET` is unset or under 16 characters.
+- **Concurrent Streamable HTTP sessions are now capped at 100.** Each session holds a full `McpServer` + transport in memory for up to 30 idle minutes (`SESSION_IDLE_MS`); a new session beyond the cap gets a `503` with a clear body instead of unbounded growth. Cheap insurance on top of the auth fix above, not a replacement for it.
+
+### Added
+- `src/utils/httpAuth.ts` — shared constant-time credential check (`isAuthorized`/`isValidUrlSecret`/`isValidBearerToken`) used by both `src/index.ts` and `src/oauth.ts`.
+- `MCP_URL_SECRET` env var (see `.env.example`) — a long random path segment. `MCP_AUTH_TOKEN`'s `.env.example` comment corrected: it was documented as protecting `/sse` and was previously not read anywhere in the codebase.
+
+### Migration note
+**Deploying this requires updating the claude.ai org Connector URL at the same time**, from the bare `/mcp` to `/mcp/<MCP_URL_SECRET>`, or the connector goes dark the moment this ships (bare `/mcp` now demands a Bearer header the connector can't send). See PROJECT-STATUS.md.
+
 ## [2026-08-12] — two remaining silent-truncation gaps
 
 Follow-up to the two entries below (same date, same root incident). A cross-check of the shipped fixes against the original defect list found two cases still open — both the same failure mode the rest of the work closed: a tool reporting a confident answer that the query never actually supported.

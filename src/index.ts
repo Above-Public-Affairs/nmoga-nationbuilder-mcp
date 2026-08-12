@@ -18,9 +18,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "crypto";
 import type { Server } from "node:http";
 import express from "express";
+import type { Request, Response } from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
 import { bootstrapToken, createOAuthRouter, getOAuthToken, getTokenStoreStatus, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
 import { reportError, reportErrorThrottled, reportAndFlush, safeErr } from "./utils/errorReporter.js";
+import { getMcpUrlSecret, isAuthorized } from "./utils/httpAuth.js";
 import { registerSignupTools } from "./tools/signups.js";
 import { registerTagTools } from "./tools/tags.js";
 import { registerContactTools } from "./tools/contacts.js";
@@ -177,12 +179,48 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     throw new Error("No access token available. Complete OAuth flow at /oauth/authorize or set NATIONBUILDER_ACCESS_TOKEN.");
   };
 
+  // Every HTTP entry point (/mcp, /sse, /oauth/authorize, /oauth/status) is
+  // gated by isAuthorized() — MCP_URL_SECRET as a URL path segment (for
+  // claude.ai org connectors, which can't send custom headers) or an
+  // MCP_AUTH_TOKEN Bearer header (for mcp-remote/curl/local dev). With
+  // neither set, this server is unreachable by anyone — say so loudly at
+  // boot rather than let it surface as a silent connector outage.
+  if (!getMcpUrlSecret() && !process.env.MCP_AUTH_TOKEN) {
+    console.error(
+      "CRITICAL: neither MCP_URL_SECRET nor MCP_AUTH_TOKEN is set. /mcp, /sse, and " +
+      "/oauth/authorize|status will reject every request. Set MCP_URL_SECRET (a long " +
+      "random path segment) and point the claude.ai org connector at /mcp/<that value>."
+    );
+    reportError({
+      category: "auth_error",
+      message: "startup: no MCP_URL_SECRET and no MCP_AUTH_TOKEN — HTTP endpoints are unreachable",
+    });
+  } else if (!getMcpUrlSecret()) {
+    console.error(
+      "WARNING: MCP_URL_SECRET is not set — the secret-path routes (/mcp/<secret>, " +
+      "/sse/<secret>) are disabled. Only Bearer-authenticated requests to the bare " +
+      "routes will work. The claude.ai org connector cannot send a Bearer header, so " +
+      "it needs MCP_URL_SECRET set and its connector URL pointed at /mcp/<that value>."
+    );
+  } else if (getMcpUrlSecret()!.length < 16) {
+    console.error(
+      "WARNING: MCP_URL_SECRET is shorter than 16 characters — use a longer random " +
+      "value; a short one is guessable and defeats the point of a secret path."
+    );
+  }
+
   // Track active transports by session ID (Streamable HTTP)
   const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
   // Last time each session was used, so idle sessions can be reaped
   const sessionLastSeen = new Map<string, number>();
   // Track active SSE transports (legacy)
   const sseTransports = new Map<string, SSEServerTransport>();
+
+  // Reject new Streamable HTTP sessions beyond this — cheap insurance
+  // against unbounded memory growth even with auth in front of it. Each
+  // session holds a full McpServer + transport in memory for up to
+  // SESSION_IDLE_MS.
+  const MAX_CONCURRENT_SESSIONS = 100;
 
   // Sessions live in memory only. Clients rarely send DELETE (Claude's connector
   // never does), so onclose alone leaves entries — and their McpServer instances —
@@ -206,13 +244,22 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     }
   }, 5 * 60 * 1000);
 
-  // Mount OAuth routes
+  // Mount OAuth routes. /oauth/authorize and /oauth/status are gated (see
+  // requireOauthAuth in oauth.ts) — same MCP_URL_SECRET-path-or-Bearer model
+  // as /mcp below. /oauth/callback is deliberately left unauthenticated and
+  // at its existing path: it's the redirect target NationBuilder itself
+  // calls, protected instead by the CSRF state check, and moving it would
+  // require updating the callback URL registered with NationBuilder.
   if (isOAuthConfigured()) {
     app.use(createOAuthRouter());
-    console.error("OAuth routes enabled: /oauth/authorize, /oauth/callback, /oauth/status");
+    console.error(
+      "OAuth routes enabled: /oauth/<secret>/authorize, /oauth/callback (unauthenticated), " +
+      "/oauth/<secret>/status — secret is MCP_URL_SECRET, or use a Bearer MCP_AUTH_TOKEN"
+    );
   }
 
-  // Health check
+  // Health check — deliberately the one route left unauthenticated, so
+  // Railway's health probe (which sends no credentials) keeps working.
   app.get("/health", (_req, res) => {
     const oauthToken = getOAuthToken();
     res.json({
@@ -222,8 +269,9 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     });
   });
 
-  // Streamable HTTP endpoint — modern mcp-remote uses this
-  app.all("/mcp", async (req, res) => {
+  // Shared handler for both the secret-path and bare Streamable HTTP
+  // routes below — auth has already been checked by the caller.
+  async function handleMcpRequest(req: Request, res: Response): Promise<void> {
     console.error(`Streamable HTTP ${req.method} from ${req.ip}`);
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
@@ -252,6 +300,19 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
           id: null,
         });
       } else if (req.method === "POST") {
+        // Reject before spending a McpServer + transport on it — cheap
+        // insurance against unbounded memory growth even with auth in front.
+        if (streamableTransports.size >= MAX_CONCURRENT_SESSIONS) {
+          console.error(
+            `Rejecting new session — at capacity (${streamableTransports.size}/${MAX_CONCURRENT_SESSIONS})`
+          );
+          res.status(503).json({
+            error: "server_busy",
+            message: `Server is at its concurrent session limit (${MAX_CONCURRENT_SESSIONS}). Try again shortly.`,
+          });
+          return;
+        }
+
         // New session — first POST has no session ID (the initialize request)
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
@@ -308,13 +369,42 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
       if (!res.headersSent) res.status(500).json({ error: "server_error" });
       else if (!res.writableEnded) res.end();
     }
+  }
+
+  // Streamable HTTP, secret-path route — the URL itself is the credential.
+  // This is what the claude.ai org connector must be configured to use,
+  // since it cannot send custom headers. Wrong secret -> 404, not 401: it
+  // shouldn't confirm that a gated route exists at all.
+  app.all("/mcp/:mcpSecret", async (req, res) => {
+    if (!isAuthorized(req, req.params.mcpSecret)) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    await handleMcpRequest(req, res);
   });
 
-  // Legacy SSE endpoint — fallback for older clients
-  app.get("/sse", async (req, res) => {
+  // Streamable HTTP, bare route — for callers that can send headers
+  // (mcp-remote, curl, local dev). Requires a Bearer MCP_AUTH_TOKEN; never
+  // establishes a session without one.
+  app.all("/mcp", async (req, res) => {
+    if (!isAuthorized(req)) {
+      res.status(401).json({
+        error: "unauthorized",
+        message: "Provide Authorization: Bearer <MCP_AUTH_TOKEN>, or use the secret-path URL.",
+      });
+      return;
+    }
+    await handleMcpRequest(req, res);
+  });
+
+  // Shared handler for the legacy SSE connect — both the secret-path and
+  // bare routes below construct the transport with the messages endpoint
+  // that matches how they were reached, so the client's follow-up POSTs
+  // land on an equally-gated path.
+  async function handleSseConnect(req: Request, res: Response, messagesPath: string): Promise<void> {
     console.error(`Legacy SSE connection from ${req.ip}`);
 
-    const transport = new SSEServerTransport("/messages", res);
+    const transport = new SSEServerTransport(messagesPath, res);
     const sessionId = transport.sessionId;
     sseTransports.set(sessionId, transport);
 
@@ -342,10 +432,11 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
       if (!res.headersSent) res.status(500).json({ error: "server_error" });
       else if (!res.writableEnded) res.end();
     }
-  });
+  }
 
-  // Legacy messages endpoint
-  app.post("/messages", async (req, res) => {
+  // Shared handler for the legacy /messages POST — auth has already been
+  // checked by the caller.
+  async function handleSseMessage(req: Request, res: Response): Promise<void> {
     const sessionId = req.query.sessionId as string;
     const transport = sseTransports.get(sessionId);
 
@@ -374,6 +465,44 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
       if (!res.headersSent) res.status(500).json({ error: "server_error" });
       else if (!res.writableEnded) res.end();
     }
+  }
+
+  // Legacy SSE, secret-path routes — same URL-is-the-credential model as /mcp.
+  app.get("/sse/:sseSecret", async (req, res) => {
+    if (!isAuthorized(req, req.params.sseSecret)) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    await handleSseConnect(req, res, `/sse/${req.params.sseSecret}/messages`);
+  });
+
+  app.post("/sse/:sseSecret/messages", async (req, res) => {
+    if (!isAuthorized(req, req.params.sseSecret)) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    await handleSseMessage(req, res);
+  });
+
+  // Legacy SSE, bare routes — for header-capable callers (mcp-remote, curl,
+  // local dev). Requires a Bearer MCP_AUTH_TOKEN.
+  app.get("/sse", async (req, res) => {
+    if (!isAuthorized(req)) {
+      res.status(401).json({
+        error: "unauthorized",
+        message: "Provide Authorization: Bearer <MCP_AUTH_TOKEN>, or use the secret-path URL.",
+      });
+      return;
+    }
+    await handleSseConnect(req, res, "/messages");
+  });
+
+  app.post("/messages", async (req, res) => {
+    if (!isAuthorized(req)) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    await handleSseMessage(req, res);
   });
 
   // Refresh OAuth token periodically (every 30 minutes)
@@ -394,11 +523,16 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
 
   httpServer = app.listen(port, () => {
     console.error(`NMOGA NationBuilder MCP server listening on port ${port}`);
-    console.error(`Streamable HTTP: http://localhost:${port}/mcp`);
-    console.error(`Legacy SSE: http://localhost:${port}/sse`);
+    // Never print MCP_URL_SECRET's value — these lines say where the gated
+    // routes live, not what unlocks them. See the MCP_URL_SECRET/
+    // MCP_AUTH_TOKEN warnings logged above for whether anything can reach them.
+    console.error(`Streamable HTTP (secret path): http://localhost:${port}/mcp/<MCP_URL_SECRET>`);
+    console.error(`Streamable HTTP (bare, Bearer-gated): http://localhost:${port}/mcp`);
+    console.error(`Legacy SSE (secret path): http://localhost:${port}/sse/<MCP_URL_SECRET>`);
+    console.error(`Legacy SSE (bare, Bearer-gated): http://localhost:${port}/sse`);
     console.error(`Health check: http://localhost:${port}/health`);
     if (isOAuthConfigured()) {
-      console.error(`OAuth: http://localhost:${port}/oauth/authorize`);
+      console.error(`OAuth (gated): http://localhost:${port}/oauth/<MCP_URL_SECRET>/authorize`);
     }
 
     // State the persistence situation at boot. A missing volume otherwise only

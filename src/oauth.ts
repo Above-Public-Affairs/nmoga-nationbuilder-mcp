@@ -20,10 +20,12 @@
  */
 
 import { Router } from "express";
+import type { Request, Response, NextFunction } from "express";
 import { randomBytes, createHash } from "crypto";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { reportError, reportErrorThrottled, resetThrottle, safeErr } from "./utils/errorReporter.js";
+import { isAuthorized } from "./utils/httpAuth.js";
 
 interface TokenData {
   accessToken: string;
@@ -397,12 +399,31 @@ export async function forceRefreshToken(): Promise<boolean> {
   return doRefresh();
 }
 
+/**
+ * Gates /oauth/authorize and /oauth/status: either credential accepted by
+ * isAuthorized() (MCP_URL_SECRET as a path segment, or an MCP_AUTH_TOKEN
+ * Bearer header) unlocks the route. Without one, /oauth/authorize can
+ * initiate a flow that replaces the server's working NationBuilder token
+ * with whatever any visitor authorizes, and /oauth/status leaks token
+ * expiry, store path, and writability — to anyone with the URL.
+ *
+ * 404, not 401: a wrong path segment shouldn't confirm that a gated route
+ * exists at all.
+ */
+function requireOauthAuth(req: Request, res: Response, next: NextFunction): void {
+  if (isAuthorized(req, req.params.oauthSecret)) {
+    next();
+    return;
+  }
+  res.status(404).json({ error: "not_found" });
+}
+
 /** Create Express router with OAuth routes */
 export function createOAuthRouter(): Router {
   const router = Router();
 
-  // GET /oauth/authorize — redirect user to NationBuilder consent screen
-  router.get("/oauth/authorize", (_req, res) => {
+  // GET /oauth/:oauthSecret/authorize — redirect user to NationBuilder consent screen
+  router.get("/oauth/:oauthSecret/authorize", requireOauthAuth, (_req, res) => {
     const { slug, clientId, callbackUrl } = getConfig();
 
     if (!clientId || !callbackUrl) {
@@ -637,8 +658,8 @@ export function createOAuthRouter(): Router {
     }
   });
 
-  // GET /oauth/status — check current auth state
-  router.get("/oauth/status", (_req, res) => {
+  // GET /oauth/:oauthSecret/status — check current auth state
+  router.get("/oauth/:oauthSecret/status", requireOauthAuth, (_req, res) => {
     const oauthConfigured = isOAuthConfigured();
     const hasOAuthToken = !!tokenData;
     const hasStaticToken = !!process.env.NATIONBUILDER_ACCESS_TOKEN;

@@ -130,7 +130,8 @@ npm run build
 | `NATIONBUILDER_REFRESH_TOKEN` | No | First-boot fallback only, same as the access token above |
 | `TOKEN_STORE_PATH` | No | Overrides where tokens are persisted. Defaults to `$RAILWAY_VOLUME_MOUNT_PATH/nb-tokens.json`. |
 | `PORT` | No | HTTP port for SSE mode (Railway sets automatically) |
-| `MCP_AUTH_TOKEN` | No | Currently **unused** — the `/mcp` endpoint is not gated. Present in the Railway env but not read by the code. |
+| `MCP_URL_SECRET` | HTTP mode — required in production | Long random path segment. Every HTTP route except `/health` and `/oauth/callback` is gated behind this-as-a-URL-segment (`/mcp/<secret>`, `/sse/<secret>`, `/oauth/<secret>/authorize`, `/oauth/<secret>/status`) or `MCP_AUTH_TOKEN` (below) — claude.ai org connectors can't send custom headers, so the URL itself has to carry the credential for that caller. |
+| `MCP_AUTH_TOKEN` | No | Bearer token accepted as an alternative to `MCP_URL_SECRET` on the bare (non-secret-path) routes — `Authorization: Bearer <token>`. For callers that can send headers: mcp-remote, curl, local dev. |
 
 ### Token persistence (OAuth mode) — requires a volume
 
@@ -145,7 +146,9 @@ someone re-runs `/oauth/authorize`. The production service has a volume at
 `/data`. If persistence isn't working you'll see a `CRITICAL:` line in the deploy
 logs, and the `/oauth/callback` success page says so explicitly.
 
-Check current auth state any time at `/oauth/status`.
+Check current auth state any time at `/oauth/<secret>/status` (see `MCP_URL_SECRET`
+above; `/oauth/authorize`/`/oauth/status` require the same credential — see
+"Environment Variables" above).
 
 ## Development
 

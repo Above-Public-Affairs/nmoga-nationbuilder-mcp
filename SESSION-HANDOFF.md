@@ -1,5 +1,17 @@
 # Session Handoff
 
+## Update (2026-08-12, later session) — HTTP endpoints authenticated, not yet deployed
+
+A same-day code review found `/mcp`, `/sse`, `/oauth/authorize`, and `/oauth/status` were
+completely unauthenticated in production — see the CHANGELOG's `[2026-08-12] — HTTP
+endpoints authenticated` entry for the fix. This resolves the "MCP_AUTH_TOKEN never read"
+gap noted in "Next steps" below — `MCP_AUTH_TOKEN` is now checked as a Bearer credential,
+and a new `MCP_URL_SECRET` env var gates a secret-path route for the org connector (which
+can't send headers). Built on the `claude/priceless-gagarin-c1c315` branch; **not merged or
+deployed** — deploying it requires Josh to set `MCP_URL_SECRET` on Railway and update the
+claude.ai org Connector URL to `/mcp/<that value>` in the same window, or the connector goes
+dark the moment it ships. See PROJECT-STATUS.md's URGENT To-Do item.
+
 ## Where things stand (2026-08-12)
 
 The server is live on Railway (`nmoga-nationbuilder-mcp`, production environment) at
@@ -122,9 +134,8 @@ manual re-authorize until it's fixed.
 - ~~Confirm the persistence fix survives a real redeploy~~ — done 2026-08-11, verified by
   an actual restart.
 - ~~Reconcile `PROJECT-STATUS.md` with reality~~ — done 2026-08-11.
-- `MCP_AUTH_TOKEN` is set in the Railway env but never read by the code — `/mcp` is
-  ungated. Either wire it up (and configure the Connector to send it) or drop the variable,
-  so it stops reading like protection that isn't there.
+- ~~`MCP_AUTH_TOKEN` is set in the Railway env but never read by the code — `/mcp` is
+  ungated.~~ — fixed in the later 2026-08-12 session above; not yet deployed.
 - `RAILWAY_API_TOKEN` is now unused and can be deleted from the service.
 - **Not yet live-verified:** this session's `phone_number`/`mobile_number` rename and the
   new `extra_fields[signups]=registered_address` query — no static token or deploy access
