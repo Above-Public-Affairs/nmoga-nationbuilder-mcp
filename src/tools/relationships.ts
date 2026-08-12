@@ -38,6 +38,16 @@ async function getOrgName(
   }
 }
 
+interface EmployerSearchResult {
+  people: { id: string; attrs: SignupAttributes }[];
+  /** Hit the MAX_RELATED_PEOPLE cap — more matches exist. */
+  truncated: boolean;
+  /** NationBuilder refused the employer filter itself. Distinct from "no
+   *  matches": an empty `people` here means the search never ran, not that
+   *  the organization has nobody. */
+  filterRejected: boolean;
+}
+
 /**
  * Find people whose employer matches a given name. Pages to exhaustion (or
  * the cap) rather than returning just the first page — this filter has no
@@ -47,7 +57,7 @@ async function getOrgName(
 async function findPeopleByEmployer(
   client: NationBuilderClient,
   employerName: string
-): Promise<{ people: { id: string; attrs: SignupAttributes }[]; truncated: boolean }> {
+): Promise<EmployerSearchResult> {
   const people: { id: string; attrs: SignupAttributes }[] = [];
   let page = 1;
   let truncated = false;
@@ -69,12 +79,19 @@ async function findPeopleByEmployer(
       if (response.data.length < PAGE_SIZE) break;
       page += 1;
     }
-    return { people, truncated };
+    return { people, truncated, filterRejected: false };
   } catch (err) {
-    // If employer filter isn't supported, fall back to parent_id
+    // NationBuilder 400s when it won't accept the employer filter at all,
+    // rather than returning zero rows. Those two cases must not look alike:
+    // reporting a rejected filter as "no people found" is indistinguishable
+    // from a genuinely empty organization, and a roster built on that
+    // silence reads as complete when nothing was ever actually searched.
+    // Callers surface `filterRejected` instead of treating [] as an answer.
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("400") || msg.includes("could not find")) {
-      return { people: [], truncated: false };
+      // Keep whatever earlier pages returned — a mid-walk rejection still
+      // leaves real, if partial, results worth reporting.
+      return { people, truncated, filterRejected: true };
     }
     throw err;
   }
@@ -108,7 +125,11 @@ export function registerRelationshipTools(
         }
 
         // Step 2: Find people by employer match
-        const { people, truncated: employerTruncated } = await findPeopleByEmployer(client, orgName);
+        const {
+          people,
+          truncated: employerTruncated,
+          filterRejected: employerFilterRejected,
+        } = await findPeopleByEmployer(client, orgName);
 
         // Step 3: Also try parent_id filter (single page — parent_id is a
         // secondary, best-effort lookup; if it silently 400s that's fine)
@@ -136,17 +157,18 @@ export function registerRelationshipTools(
         }
 
         if (people.length === 0) {
+          const text = employerFilterRejected
+            ? `INCONCLUSIVE — no people found for organization "${orgName}" (ID: ${params.org_id}), but NationBuilder rejected the employer-field filter, so the employer search never actually ran. This is NOT evidence the organization has no members. Use list_native_relationships for formal relationship records instead.`
+            : `No people found related to organization "${orgName}" (ID: ${params.org_id}).`;
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: `No people found related to organization "${orgName}" (ID: ${params.org_id}).`,
-              },
-            ],
+            content: [{ type: "text" as const, text }],
           };
         }
 
         let result = `Found ${people.length} people related to **${orgName}** (ID: ${params.org_id}):\n\n`;
+        if (employerFilterRejected) {
+          result += `INCOMPLETE — NationBuilder rejected the employer-field filter partway through, so this list is missing any employer matches beyond what is shown. Do not treat it as the organization's full membership.\n\n`;
+        }
         for (const person of people) {
           const name =
             person.attrs.full_name ||
@@ -224,6 +246,7 @@ export function registerRelationshipTools(
       > = new Map();
       const errors: string[] = [];
       const truncatedOrgs: string[] = [];
+      const rejectedFilterOrgs: string[] = [];
 
       for (const orgId of ids) {
         try {
@@ -235,8 +258,12 @@ export function registerRelationshipTools(
           }
 
           // Find people by employer
-          const { people, truncated } = await findPeopleByEmployer(client, orgName);
+          const { people, truncated, filterRejected } = await findPeopleByEmployer(client, orgName);
           if (truncated) truncatedOrgs.push(orgId);
+          // A rejected filter returns rather than throws, so it never reaches
+          // the catch below — without this it would silently read as "searched
+          // that org, found nobody."
+          if (filterRejected) rejectedFilterOrgs.push(orgId);
           for (const person of people) {
             const name =
               person.attrs.full_name ||
@@ -273,6 +300,10 @@ export function registerRelationshipTools(
 
       if (truncatedOrgs.length > 0) {
         result += `\n---\nTRUNCATED — hit the ${MAX_RELATED_PEOPLE}-person cap for org(s) ${truncatedOrgs.join(", ")}. More employer matches likely exist for these; this is not their complete membership.`;
+      }
+
+      if (rejectedFilterOrgs.length > 0) {
+        result += `\n---\nINCONCLUSIVE — NationBuilder rejected the employer-field filter for org(s) ${rejectedFilterOrgs.join(", ")}. The search did not run for them, so a zero or low count above is NOT evidence they have no members. Use list_native_relationships for formal relationship records.`;
       }
 
       return {

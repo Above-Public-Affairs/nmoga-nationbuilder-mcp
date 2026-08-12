@@ -20,6 +20,12 @@ export interface ResolvedTag {
   name: string;
 }
 
+/** Paging bounds for resolveTagByName's case-insensitive fallback. The cap
+ *  exists so a one- or two-character search string (which `match` will pair
+ *  with a large share of the nation's tags) can't walk forever. */
+const TAG_MATCH_PAGE_SIZE = 100;
+const MAX_TAG_MATCH_PAGES = 50;
+
 /**
  * Resolve a tag name to its NationBuilder ID. Case-insensitive: NB stores
  * names with mixed casing (e.g. `CMTE_Legislative`, `WG_Seismicity`) and an
@@ -41,19 +47,40 @@ export async function resolveTagByName(
     return { id: exact.data[0].id, name: exact.data[0].attributes.name };
   }
 
-  // Fallback: case-insensitive match via prefix search. We search by the
-  // longest unambiguous prefix (the whole name, lowercased + as-is) and pick
-  // the entry whose name matches case-insensitively. NB's `match` operator is
-  // a partial substring match, which is what we want here.
-  const fuzzy = await client.get<TagAttributes>("signup_tags", {
-    filter: { name: { match: trimmed } },
-    page_size: 100,
-  });
+  // Fallback: case-insensitive match via substring search. NB's `match`
+  // operator is a partial substring match, so a short name can pull in a lot
+  // of unrelated tags (searching "cmte" matches every committee tag).
+  //
+  // Paged rather than single-shot: this used to take one 100-row page and
+  // return null if the real tag wasn't in it, which surfaced to the caller as
+  // "Tag not found ... the tag must exist in the nation" — confidently wrong
+  // about a tag that does exist. `signup_tags` reports no total (see
+  // resolvePagination), so a full page is the only signal more may follow.
+  //
+  // Exits as soon as a match is found, so the common case still costs one
+  // request; only an unmatched short substring walks further.
   const lower = trimmed.toLowerCase();
-  const hit = fuzzy.data.find(
-    (t) => (t.attributes.name ?? "").toLowerCase() === lower
-  );
-  return hit ? { id: hit.id, name: hit.attributes.name } : null;
+  let page = 1;
+
+  while (page <= MAX_TAG_MATCH_PAGES) {
+    const fuzzy = await client.get<TagAttributes>("signup_tags", {
+      filter: { name: { match: trimmed } },
+      page_size: TAG_MATCH_PAGE_SIZE,
+      page_number: page,
+    });
+
+    const hit = fuzzy.data.find(
+      (t) => (t.attributes.name ?? "").toLowerCase() === lower
+    );
+    if (hit) return { id: hit.id, name: hit.attributes.name };
+
+    // Short page = last page. Checked against the raw response length, not a
+    // filtered one — same reason getAllSignupIdsForTagId does.
+    if (fuzzy.data.length < TAG_MATCH_PAGE_SIZE) break;
+    page += 1;
+  }
+
+  return null;
 }
 
 export interface TaggingsPage {

@@ -7,12 +7,26 @@ The server is live on Railway (`nmoga-nationbuilder-mcp`, production environment
 (`/mcp`) as an org Connector, with legacy SSE (`/sse`) kept for older clients. Auth is
 OAuth against the `nmoga` NationBuilder nation, with a static-token fallback.
 
-**This session's fix (about to ship via `/push`):** root incident — a session asked which
-committee/workgroup tags a 9-person roster carried, found no person→tags tool, read
-`get_person`'s "returns all available fields" claim, and concluded *"NationBuilder's API
-doesn't expose a person's tag list."* False — it was a tool gap. It then ran 34 reverse
-tag scans, stopped at page 1 of each, and reported six people as tag-less; that report
-reached a coworker as fact. Fixed:
+**This session's fix (about to ship via `/push`):** a cross-check of everything already
+merged for the root incident (below) against the original nine-item defect list turned up
+two gaps still open, both the same failure mode as the rest — a tool answering confidently
+where the query never supported the answer:
+
+- **`resolveTagByName`'s case-insensitive fallback read one 100-row page.** A tag whose
+  stored casing differs from the caller's, sitting past the first 100 substring matches,
+  resolved to *"Tag not found ... the tag must exist in the nation"* — wrong about a tag
+  that exists. Fed `list_people_with_tag` and `advanced_search`'s `tag` param; being an
+  internal lookup, the new pagination warnings never reached the caller. Now paged (50-page
+  cap) with an early exit on match, so the common case still costs one request.
+- **A NationBuilder-rejected employer filter looked exactly like an empty organization.**
+  `findPeopleByEmployer` swallowed the 400 and returned `[]`; `list_org_members` said "No
+  people found," and `list_org_members_batch` didn't even count the org as an error (the
+  helper returned rather than threw), so it rendered as "searched successfully, 0 people."
+  Both now say so explicitly and point at `list_native_relationships`. This one mattered
+  most because `list_org_members` is the likely source of the incident's original 9-person
+  roster.
+
+**Previously merged for the same incident** (`69d6225`):
 
 - **Honest pagination everywhere.** NationBuilder V2 sends no result total on any endpoint
   this server calls — confirmed live against `signups`, `signup_tags`, `signup_taggings`,
@@ -38,13 +52,22 @@ reached a coworker as fact. Fixed:
 Full detail in `CHANGELOG.md`'s `[2026-08-12]` entry (the second one — same date as the
 `advanced_search`/`include` fix below, different session).
 
-**Known gotcha for whoever picks this up next:** a sibling session
-(`claude/nationbuilder-tag-matching-issues-21c879`) built an independent, uncommitted
-implementation of the *same* incident's pagination/tag fixes in a different worktree, with
-a different architecture (an eager `fetchAllPages()` helper vs. this session's honest-but-lazy
-per-page reporting). Neither had committed as of this handoff. If you're resuming either
-branch, check whether the other has since been merged before continuing — otherwise you'll
-be redoing work that already shipped, or shipping something that conflicts with what did.
+**Resolved — the duplicate-work collision.** A sibling session
+(`claude/nationbuilder-tag-matching-issues-21c879`) had independently built the *same*
+incident's pagination/tag fixes in another worktree, with a different architecture (an
+eager `fetchAllPages()` helper vs. this codebase's honest-but-lazy per-page reporting).
+Both shipped-ready at once. `69d6225` won on merit — broader coverage, live-verified
+findings, and the signup field-name audit the other branch never found — and the sibling
+branch was deleted, local and remote, without merging. Merging it would have crashed the
+server at startup: the MCP SDK throws on duplicate tool registration, and both had added
+`get_person_tags`. Nothing from it is outstanding; the two items in this session's fix
+above are the only pieces of that branch's work that weren't already covered.
+
+**Lesson worth keeping:** `git stash` is one stack shared across *every* worktree of a
+repo, not per-worktree. Two sessions stashing concurrently in different worktrees of this
+repo popped each other's entries. Nothing was lost, but if more than one session may be
+touching a repo, name the stash and pop by explicit `stash@{n}` — or commit WIP to a
+throwaway branch instead.
 
 Earlier fixes, landed and merged to `main`:
 
@@ -108,9 +131,14 @@ manual re-authorize until it's fixed.
   was available in-session to exercise them against the real nation. First live call after
   deploy should confirm a person's phone/mobile/address actually renders now, and that
   `create_person` with an address round-trips correctly.
-- **Reconcile with the sibling session's tag/pagination work** (see "Known gotcha" above)
-  before or shortly after this ships — two independent implementations of the same fix
-  shouldn't both land.
+- ~~Reconcile with the sibling session's tag/pagination work~~ — done; that branch was
+  deleted unmerged in favour of `69d6225` (see "Resolved" above).
+- **The original incident has still never been re-run against live data.** Every fix for it
+  so far — across three sessions — was verified against mocked clients and synthetic
+  fixtures only. Nobody has re-pulled the actual 9-person roster and called
+  `get_person_tags` on it to find out whether the six people reported as carrying no
+  WG/CMTE tags actually do. That is the question the coworker originally asked, and it is
+  still unanswered. The tooling to answer it is now deployed.
 - No `LESSONS.md` yet in this repo — consider starting one if patterns worth compounding
   keep showing up (e.g. "NB V2 attribute names don't match their marketing docs — check
   the nation's own OpenAPI spec before trusting a HOWTO article or an assumed name"; this

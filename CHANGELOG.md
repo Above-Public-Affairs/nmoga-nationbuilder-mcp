@@ -1,6 +1,12 @@
 # Changelog
 
-## [2026-08-12] — honest pagination, person→tags, and a signup field-name audit
+## [2026-08-12] — two remaining silent-truncation gaps
+
+Follow-up to the two entries below (same date, same root incident). A cross-check of the shipped fixes against the original defect list found two cases still open — both the same failure mode the rest of the work closed: a tool reporting a confident answer that the query never actually supported.
+
+### Fixed
+- **`resolveTagByName`'s case-insensitive fallback took a single 100-row page.** When a caller's casing didn't match NationBuilder's stored casing (`cmte_legislative` vs `CMTE_Legislative`), the exact-match fast path misses and the fallback does a substring `match` search — but it read only the first page. If more than 100 tags contained the search string and the real one wasn't among them, the function returned `null` and the caller reported *"Tag `X` not found. Tag names are looked up case-insensitively, but the tag must exist in the nation."* — confidently wrong about a tag that does exist. This fed both `list_people_with_tag` and `advanced_search`'s `tag` parameter, and being an internal lookup, none of the new pagination warnings reached the caller. Now pages the fallback (capped at 50 pages), exiting as soon as a match is found so the common case still costs one request.
+- **A rejected employer filter was indistinguishable from an organization with no members.** `findPeopleByEmployer` caught NationBuilder's 400 and returned an empty array, so `list_org_members` reported *"No people found related to organization X"* whether the org was genuinely empty or the search had never run. `list_org_members_batch` was worse: because the helper returned rather than threw, the affected org never reached the error list either, and rendered as "searched successfully, 0 people." Both tools now surface the rejection explicitly and state that it is not evidence of an empty organization, pointing to `list_native_relationships` instead. A mid-walk rejection now also keeps the pages already fetched rather than discarding them.
 
 This entry covers a separate session from the one below it (same date). Root incident: asked which committee/workgroup tags a 9-person roster carried, a session found no person→tags tool, read `get_person`'s "returns all available fields" claim, and concluded *"NationBuilder's API doesn't expose a person's tag list"* — false, it was a tool gap. It then ran 34 reverse tag scans, stopped at page 1 of each, and reported six people as tag-less. That report reached a coworker as fact.
 
