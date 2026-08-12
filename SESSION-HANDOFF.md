@@ -1,20 +1,36 @@
 # Session Handoff
 
-## Where things stand (2026-08-11)
+## Where things stand (2026-08-12)
 
 The server is live on Railway (`nmoga-nationbuilder-mcp`, production environment) at
 `https://nmoga-nationbuilder-mcp-production.up.railway.app`, using Streamable HTTP
 (`/mcp`) as an org Connector, with legacy SSE (`/sse`) kept for older clients. Auth is
 OAuth against the `nmoga` NationBuilder nation, with a static-token fallback.
 
-Two independent fixes landed and merged to `main` around the same time:
+**This session's fix (about to ship via `/push`):** `advanced_search`'s `include`
+parameter — and `list_memberships`/`get_membership`'s hardcoded `include=signup,membership_type`
+— fetched JSON:API sideloaded data into `response.included` and never rendered it. The
+call succeeded, paid the round-trip, and the caller never saw the data, with no error or
+signal anything was omitted. This produced a wrong conclusion in a sibling session: a
+clean-but-empty `advanced_search(include='tags')` response was read as "the API doesn't
+expose a person's tags." That's doubly wrong — `formatting.ts` already had a `formatTag`
+formatter (the bug was wiring, not missing code), and `include=tags` on `signups` actually
+hard-400s (confirmed live) rather than returning empty; NB validates includes and rejects
+unsupported ones outright. Fix: a shared `formatIncludedResource`/`formatIncludedSection`
+renderer in `src/utils/formatting.ts` (dispatches by JSON:API type to the existing
+formatters; unmapped types get a generic id/type/attrs fallback rather than being
+dropped), wired into `advanced_search` and both membership tools. Also corrected the
+`tags` example in `advanced_search`'s description and the server `INSTRUCTIONS` block —
+both had advertised it as a working value. Full detail in CHANGELOG.md `[2026-08-12]`.
+
+Earlier fixes, landed and merged to `main`:
 
 - **Session/OAuth robustness** (`claude/nmoga-nationbuilder-connector-1f497b`, merged via
   PR #1): unknown session IDs now return 404 (so clients auto-recover instead of going
   dark), OAuth token persistence to Railway now tries both credential styles, idle
   sessions are reaped, and error reporting covers process-level failures, all three
   Express routes, and API-client retry exhaustion.
-- **`search_people` org filter fix** (this session): `is_organization` was mapped to a
+- **`search_people` org filter fix**: `is_organization` was mapped to a
   nonexistent `filter[is_organization]` and 400'd on every call. Now maps to
   `filter[signup_type]` (0=person, 1=organization) — confirmed against the nation's own
   OpenAPI spec at `/api/v2/docs/v2/released.yaml`. See CHANGELOG.md for full detail.

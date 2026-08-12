@@ -1,5 +1,17 @@
 # Changelog
 
+## [2026-08-12]
+
+### Fixed
+- **`advanced_search`'s `include` parameter fetched sideloaded data and then silently dropped it.** The tool requested `include=memberships`/`petition_signatures`/etc., NationBuilder returned the records in `response.included`, and the rendering loop iterated only `response.data` — the call paid the round-trip and the caller never saw the data, with no error and no indication anything was omitted. This produced at least one wrong client-facing conclusion: a session using `include='tags'` to find a person's tags got a clean (but tag-less) response and concluded "NationBuilder's API doesn't expose a person's tag list" — a false conclusion the silent drop made look confirmed.
+- **`list_memberships` and `get_membership` requested `include=signup,membership_type` and rendered neither.** Every membership rendered as a bare status/date block with no indication of whose membership it was or what type it was.
+- The tool description's own example for `include` (`'tags,memberships,petition_signatures'`) advertised a value that cannot work: NationBuilder's `signups` endpoint validates includes and rejects `tags` outright (`HTTP 400: "The requested included relationship \"tags\" is not supported"`), confirmed live against the production nation. That error message is the more likely root of the "API doesn't expose tags" conclusion above than a genuinely empty result. Verified support matrix for `include` on `signups`: `memberships` ✅, `petition_signatures` ✅, `tags` ❌ (400), `signup_taggings` ❌ (400). A person's tags require a different query — `signup_taggings` filtered by `filter[signup_id]` with `include=tag` — which `remove_tags_from_person` already runs internally.
+
+### Added
+- `formatIncludedResource` / `formatIncludedSection` in `src/utils/formatting.ts` — a shared, type-dispatching renderer for any `response.included` array. Dispatches to the existing per-resource formatter (`formatSignup`, `formatTag`, `formatMembership`, etc.) by JSON:API `type`; an unmapped type renders generically (id, type, scalar attributes) rather than being dropped, so a future NationBuilder relationship we haven't wired a formatter for still shows up instead of vanishing. Output is grouped by type and capped at 25 records per type, with the truncation stated explicitly rather than silent. `advanced_search` now appends this section after the person list.
+- `formatMembership` now accepts the sideloaded `included` array (matching the `(resource, included?)` convention already used by `formatRsvp`, `formatPathJourney`, etc.) and renders the person's name and membership type name when available.
+- `advanced_search`'s `include` param description and the server-wide `INSTRUCTIONS` block (in `src/index.ts`) now both state plainly that tags cannot be sideloaded from `signups` and point to the correct query instead of leaving that gap for the next session to rediscover the hard way.
+
 ## [2026-08-10]
 
 ### Fixed

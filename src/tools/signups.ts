@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { NationBuilderClient } from "../client/nationbuilder.js";
 import type { SignupAttributes, QueryParams } from "../types/index.js";
-import { formatSignup, formatPagination, sanitizeText } from "../utils/formatting.js";
+import { formatSignup, formatPagination, formatIncludedSection, sanitizeText } from "../utils/formatting.js";
 import { reportError } from "../utils/errorReporter.js";
 import { resolveTagByName, getAllSignupIdsForTagId } from "../utils/tagLookup.js";
 
@@ -416,7 +416,9 @@ export function registerSignupTools(
       include: z
         .string()
         .optional()
-        .describe("Comma-separated relationships to sideload (e.g. 'tags,memberships,petition_signatures')"),
+        .describe(
+          "Comma-separated relationships to sideload on the signups endpoint, rendered in an 'Included' section below the results (e.g. 'memberships,petition_signatures'). Do NOT use 'tags' here — NationBuilder's signups endpoint rejects it outright (HTTP 400: \"not a supported relationship\"), confirmed live; it is not a real option despite looking like one. For a person's tags, use list_people_with_tag or the top-level `tag` parameter above instead."
+        ),
       fields: z
         .string()
         .optional()
@@ -517,6 +519,10 @@ export function registerSignupTools(
         for (const person of response.data) {
           result += formatSignup(person) + "\n\n";
         }
+        // `include` sideloads land in response.included and were previously
+        // dropped on the floor here — the call paid the round-trip and the
+        // caller never saw the data. See CHANGELOG.
+        result += formatIncludedSection(response.included);
         result += formatPagination(response, params.page_number, params.page_size);
 
         return {

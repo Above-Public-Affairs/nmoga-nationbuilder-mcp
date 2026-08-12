@@ -70,6 +70,8 @@ To search by custom fields, use \`search_people\` with the \`custom_field\` and 
 ### Tags
 Tags are the primary way to categorize and segment people. Use \`list_people_with_tag\` to find everyone with a specific tag, and \`list_tags\` to see all available tags.
 
+Tags are **not** sideloadable from the \`signups\` endpoint — \`advanced_search\`'s \`include\` parameter cannot fetch a person's tags (NationBuilder rejects \`include=tags\` there with an HTTP 400, "not a supported relationship"). Do not conclude from that error, or from an \`include\` that comes back empty, that tag data is unavailable via the API — it is, just through a different path: \`signup_taggings\` filtered by \`filter[signup_id]\` with \`include=tag\` (the same query \`remove_tags_from_person\` runs internally). Use \`list_people_with_tag\` for the common case (which tag), and to go the other direction (which tags does this person have) use the same \`signup_taggings\` pattern.
+
 ### Memberships
 Memberships track organizational membership tiers and statuses. Use \`list_membership_types\` to see available tiers, and \`list_memberships\` to query membership records.
 

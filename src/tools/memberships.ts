@@ -81,7 +81,7 @@ export function registerMembershipTools(
 
         let result = `Memberships:\n\n`;
         for (const membership of response.data) {
-          result += formatMembership(membership) + "\n\n";
+          result += formatMembership(membership, response.included) + "\n\n";
         }
         result += formatPagination(response, params.page_number, params.page_size);
 
@@ -112,7 +112,7 @@ export function registerMembershipTools(
           { include: "signup,membership_type" }
         );
 
-        const result = formatMembership(response.data);
+        const result = formatMembership(response.data, response.included);
 
         return {
           content: [{ type: "text" as const, text: sanitizeText(result) }],

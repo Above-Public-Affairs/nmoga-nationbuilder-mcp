@@ -176,10 +176,47 @@ export function formatRsvp(
   return lines.join("\n");
 }
 
-export function formatMembership(resource: JsonApiResource<MembershipAttributes>): string {
+export function formatMembership(
+  resource: JsonApiResource<MembershipAttributes>,
+  included?: JsonApiResource<unknown>[]
+): string {
   const a = resource.attributes;
   const lines: string[] = [];
-  lines.push(`**${a.name || "Membership"}** (ID: ${resource.id})`);
+
+  // Memberships carry no useful info on their own — they're a status/date
+  // record hung off a signup and a membership type. Without sideloading
+  // those (via include=signup,membership_type, which list_memberships and
+  // get_membership both request), every row rendered identically regardless
+  // of whose membership it was.
+  let personName = "";
+  let membershipTypeName = "";
+  if (included) {
+    const signupRel = resource.relationships?.signup?.data;
+    if (signupRel && !Array.isArray(signupRel)) {
+      const signup = included.find(
+        (r) => r.type === "signups" && r.id === signupRel.id
+      ) as JsonApiResource<SignupAttributes> | undefined;
+      if (signup) {
+        personName =
+          signup.attributes.full_name ||
+          [signup.attributes.first_name, signup.attributes.last_name].filter(Boolean).join(" ") ||
+          "";
+      }
+    }
+    const typeRel = resource.relationships?.membership_type?.data;
+    if (typeRel && !Array.isArray(typeRel)) {
+      const membershipType = included.find(
+        (r) => r.type === "membership_types" && r.id === typeRel.id
+      ) as JsonApiResource<MembershipTypeAttributes> | undefined;
+      if (membershipType) {
+        membershipTypeName = membershipType.attributes.name || "";
+      }
+    }
+  }
+
+  const title = a.name || membershipTypeName || "Membership";
+  lines.push(`**${title}**${personName ? ` — ${personName}` : ""} (ID: ${resource.id})`);
+  if (membershipTypeName && membershipTypeName !== title) lines.push(`  Type: ${membershipTypeName}`);
   if (a.status) lines.push(`  Status: ${a.status}`);
   if (a.started_at) lines.push(`  Started: ${formatDate(a.started_at)}`);
   if (a.expires_on) lines.push(`  Expires: ${formatDate(a.expires_on)}`);
@@ -407,6 +444,132 @@ export function formatIdentityMapping(resource: JsonApiResource<IdentityMappingA
   if (a.external_id) lines.push(`  External ID: ${a.external_id}`);
   if (a.created_at) lines.push(`  Created: ${formatDate(a.created_at)}`);
   return lines.join("\n");
+}
+
+// --- Generic renderer for `response.included` (sideloaded resources) -------
+//
+// Any tool that requests `include=...` gets JSON:API `included` records back
+// alongside `data`. Historically several call sites fetched them and never
+// rendered them (see CHANGELOG — advanced_search's `include` param paid the
+// round-trip and silently dropped whatever came back). These two functions
+// are the one shared place that turns `included` into text, dispatching to
+// the existing per-type formatter above where one exists.
+
+type IncludedFormatter = (
+  resource: JsonApiResource<any>,
+  included?: JsonApiResource<unknown>[]
+) => string;
+
+/**
+ * JSON:API `type` string -> the existing formatter for it. Keys are the
+ * plural snake_case resource-path names NationBuilder actually returns
+ * (confirmed against live responses and the create/update payloads already
+ * in this codebase — e.g. "signups", "signup_tags", "membership_types",
+ * "path_steps"). Deliberately not exhaustive: an unmapped type falls through
+ * to formatGenericIncluded below rather than needing a new entry here every
+ * time NationBuilder adds a relationship.
+ */
+const INCLUDED_FORMATTERS: Record<string, IncludedFormatter> = {
+  signups: (r) => formatSignup(r as JsonApiResource<SignupAttributes>),
+  signup_tags: (r) => formatTag(r as JsonApiResource<TagAttributes>),
+  memberships: (r, inc) => formatMembership(r as JsonApiResource<MembershipAttributes>, inc),
+  membership_types: (r) => formatMembershipType(r as JsonApiResource<MembershipTypeAttributes>),
+  donations: (r) => formatDonation(r as JsonApiResource<DonationAttributes>),
+  events: (r) => formatEvent(r as JsonApiResource<EventAttributes>),
+  contacts: (r) => formatContact(r as JsonApiResource<ContactAttributes>),
+  lists: (r) => formatList(r as JsonApiResource<ListAttributes>),
+  event_rsvps: (r, inc) => formatRsvp(r as JsonApiResource<EventRsvpAttributes>, inc),
+  paths: (r) => formatPath(r as JsonApiResource<PathAttributes>),
+  path_journeys: (r, inc) => formatPathJourney(r as JsonApiResource<PathJourneyAttributes>, inc),
+  relationships: (r, inc) => formatNativeRelationship(r as JsonApiResource<NativeRelationshipAttributes>, inc),
+  signup_profiles: (r) => formatSignupProfile(r as JsonApiResource<SignupProfileAttributes>),
+  petitions: (r) => formatPetition(r as JsonApiResource<PetitionAttributes>),
+  petition_signatures: (r, inc) => formatPetitionSignature(r as JsonApiResource<PetitionSignatureAttributes>, inc),
+  mailings: (r) => formatMailing(r as JsonApiResource<MailingAttributes>),
+  pages: (r) => formatPage(r as JsonApiResource<PageAttributes>),
+  sites: (r) => formatSite(r as JsonApiResource<SiteAttributes>),
+  automations: (r) => formatAutomation(r as JsonApiResource<AutomationAttributes>),
+  automation_enrollments: (r, inc) => formatAutomationEnrollment(r as JsonApiResource<AutomationEnrollmentAttributes>, inc),
+  imports: (r) => formatImport(r as JsonApiResource<ImportAttributes>),
+  signup_sources: (r) => formatSignupSource(r as JsonApiResource<SignupSourceAttributes>),
+  identity_mappings: (r) => formatIdentityMapping(r as JsonApiResource<IdentityMappingAttributes>),
+};
+
+const GENERIC_VALUE_MAX_LEN = 120;
+
+/**
+ * Fallback for a sideloaded resource type with no formatter above (a
+ * relationship NationBuilder added, or one we haven't wired up yet). Never
+ * drops the record — renders id, type, and scalar attributes. Nested
+ * objects/arrays are skipped rather than guessed at, since there's no
+ * type-specific knowledge of what they mean here.
+ */
+function formatGenericIncluded(resource: JsonApiResource<unknown>): string {
+  const lines: string[] = [`**${resource.type}** (ID: ${resource.id})`];
+  const attrs = resource.attributes;
+  if (attrs && typeof attrs === "object") {
+    for (const [key, value] of Object.entries(attrs as Record<string, unknown>)) {
+      if (value == null || typeof value === "object") continue;
+      const str = String(value);
+      lines.push(`  ${key}: ${str.length > GENERIC_VALUE_MAX_LEN ? `${str.slice(0, GENERIC_VALUE_MAX_LEN)}...` : str}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/** Render one sideloaded resource, dispatching on its JSON:API `type`. */
+export function formatIncludedResource(
+  resource: JsonApiResource<unknown>,
+  included?: JsonApiResource<unknown>[]
+): string {
+  const formatter = INCLUDED_FORMATTERS[resource.type];
+  if (!formatter) return formatGenericIncluded(resource);
+  try {
+    return formatter(resource, included);
+  } catch {
+    // A formatter assumes its type's attribute shape; if a real response
+    // doesn't match that assumption, fall back rather than let one bad
+    // record blank out the whole section.
+    return formatGenericIncluded(resource);
+  }
+}
+
+/** Cap per type so a page of sideloads with hundreds of records in one
+ *  relationship can't blow up the response — the cap is stated explicitly
+ *  rather than silently truncating, since silent drops are the exact defect
+ *  this exists to fix. */
+const MAX_INCLUDED_PER_TYPE = 25;
+
+/**
+ * Render every sideloaded resource from a JSON:API `included` array, grouped
+ * by type. Returns "" if there's nothing to show (no `include` was
+ * requested, or NationBuilder returned none) — callers can append the result
+ * unconditionally without an extra empty-check.
+ */
+export function formatIncludedSection(included?: JsonApiResource<unknown>[]): string {
+  if (!included || included.length === 0) return "";
+
+  const byType = new Map<string, JsonApiResource<unknown>[]>();
+  for (const resource of included) {
+    const bucket = byType.get(resource.type);
+    if (bucket) bucket.push(resource);
+    else byType.set(resource.type, [resource]);
+  }
+
+  const sections: string[] = [];
+  for (const type of Array.from(byType.keys()).sort()) {
+    const resources = byType.get(type)!;
+    const shown = resources.slice(0, MAX_INCLUDED_PER_TYPE);
+    let section = `### ${type} (${resources.length})\n\n${shown
+      .map((r) => formatIncludedResource(r, included))
+      .join("\n\n")}`;
+    if (resources.length > shown.length) {
+      section += `\n\n(+${resources.length - shown.length} more ${type} not shown)`;
+    }
+    sections.push(section);
+  }
+
+  return `\n---\n**Included:**\n\n${sections.join("\n\n")}`;
 }
 
 export function formatPagination<T>(response: JsonApiResponse<T>, pageNumber: number, pageSize: number): string {
