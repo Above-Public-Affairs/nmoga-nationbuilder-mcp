@@ -1,16 +1,55 @@
 # Session Handoff
 
-## Update (2026-08-12, later session) — HTTP endpoints authenticated, not yet deployed
+## Update (2026-08-12, third session) — per-user NationBuilder OAuth, not yet deployed
+
+The URL-secret fix described in the section below **did deploy** (Railway auto-deployed
+`990f436` successfully) — but `MCP_URL_SECRET` was never set on Railway, so the org
+connector's bare `/mcp` calls started getting `401`, and the connector went dark for
+everyone. Confirmed live: `/health` → 200, `POST /mcp` → 401.
+
+Rather than fix the coordination gap and restart-ship the same URL-secret model, this
+session rebuilt the auth story from scratch around per-user NationBuilder OAuth: each
+person adds this MCP as their **own personal** claude.ai connector (explicitly decided —
+no Organization Connector, no shared secret at all) and logs into NationBuilder themselves.
+Every tool call runs under that person's own NationBuilder token, so NationBuilder's own
+audit log attributes every action to the real person — which is what "fix the security
+hole" actually needed to mean, not just "who can reach the URL."
+
+Built on a **new branch, `claude/per-user-nationbuilder-oauth`** (off `main`, which already
+has the URL-secret commit) — the old `claude/priceless-gagarin-c1c315` branch was already
+merged and is done. Seven commits, each independently reviewable:
+1. Groundwork (decouple the API client from the global token, rate-limiter singleton,
+   throttle-key hygiene) — zero behavior change.
+2. `src/auth/store.ts`, the per-user credential store — added but unused.
+3. `oauth.ts`'s refresh/persistence rewired onto the store (still single-identity,
+   `legacy:shared`) — external behavior unchanged.
+4. The Authorization Server itself (`src/auth/{tokens,provider,wellKnown}.ts`) — mounted,
+   verified end-to-end against a scripted fake NationBuilder upstream, but not yet gating
+   `/mcp`.
+5. **The gate flip** — `/mcp` now requires `requireBearerAuth`; session ownership
+   re-checked on every request (the session-hijack test is the one worth re-reading in
+   CHANGELOG.md); `httpAuth.ts`, the secret-path routes, and legacy SSE all deleted.
+6. HTTP mode refuses to boot if a static NationBuilder token is set.
+7. Docs (this file, README, .env.example, CHANGELOG, PROJECT-STATUS).
+
+**Not merged or deployed.** See PROJECT-STATUS.md's URGENT To-Do for the full
+Railway-env + claude.ai-connector + NationBuilder-callback-URL coordination checklist —
+none of it can happen from this session. The connector is already dark, so there's no
+*additional* outage risk in taking the time to do this coordination correctly, but every
+person (team and non-team) will need to add their own personal connector once it ships.
+
+## Update (2026-08-12, second session) — HTTP endpoints authenticated, deployed but broken
 
 A same-day code review found `/mcp`, `/sse`, `/oauth/authorize`, and `/oauth/status` were
 completely unauthenticated in production — see the CHANGELOG's `[2026-08-12] — HTTP
 endpoints authenticated` entry for the fix. This resolves the "MCP_AUTH_TOKEN never read"
 gap noted in "Next steps" below — `MCP_AUTH_TOKEN` is now checked as a Bearer credential,
 and a new `MCP_URL_SECRET` env var gates a secret-path route for the org connector (which
-can't send headers). Built on the `claude/priceless-gagarin-c1c315` branch; **not merged or
-deployed** — deploying it requires Josh to set `MCP_URL_SECRET` on Railway and update the
-claude.ai org Connector URL to `/mcp/<that value>` in the same window, or the connector goes
-dark the moment it ships. See PROJECT-STATUS.md's URGENT To-Do item.
+can't send headers). Built on the `claude/priceless-gagarin-c1c315` branch, merged to
+`main`, and **Railway auto-deployed it successfully** — but `MCP_URL_SECRET` was never
+set, and nobody updated the claude.ai connector URL to match, so the connector went dark
+the moment it shipped. That's the coordination failure the per-user OAuth session (above)
+responded to by replacing the whole model rather than patching the sequencing.
 
 ## Where things stand (2026-08-12)
 
@@ -135,7 +174,9 @@ manual re-authorize until it's fixed.
   an actual restart.
 - ~~Reconcile `PROJECT-STATUS.md` with reality~~ — done 2026-08-11.
 - ~~`MCP_AUTH_TOKEN` is set in the Railway env but never read by the code — `/mcp` is
-  ungated.~~ — fixed in the later 2026-08-12 session above; not yet deployed.
+  ungated.~~ — fixed and deployed 2026-08-12, then superseded entirely by the per-user
+  OAuth session (top of this file): `MCP_AUTH_TOKEN`/`MCP_URL_SECRET` are dead vars now,
+  safe to delete from Railway once the per-user branch ships.
 - `RAILWAY_API_TOKEN` is now unused and can be deleted from the service.
 - **Not yet live-verified:** this session's `phone_number`/`mobile_number` rename and the
   new `extra_fields[signups]=registered_address` query — no static token or deploy access

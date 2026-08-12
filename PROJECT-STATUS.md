@@ -2,25 +2,38 @@
 
 ## Current Status
 
-**Phase:** Deployed and in production use as an org Connector. **A security fix on this
-branch (2026-08-12) gates every HTTP route and requires a coordinated deploy — see the
-To-Do item below before merging/deploying.**
+**Phase:** A same-day sequel to the URL-secret auth fix (still on this branch, not yet
+deployed — see the URGENT To-Do below). The URL-secret model went out, `MCP_URL_SECRET`
+was never set on Railway, and the connector went dark for everyone. Rather than restore
+that model, this branch replaces it entirely with **per-user NationBuilder OAuth**: each
+person adds this MCP as their **own personal** claude.ai connector (no Organization
+Connector, no shared secret) and logs into NationBuilder themselves. Every tool call runs
+under that person's own NationBuilder token, so NationBuilder's own audit log attributes
+every read and write to the real person — which is what the original security review was
+actually trying to achieve; the URL-secret fix only ever addressed "who can reach the
+server," not "who is this action attributed to."
 
-Live at `https://nmoga-nationbuilder-mcp-production.up.railway.app/mcp` (Streamable HTTP;
-legacy `/sse` retained for older clients). NationBuilder auth is OAuth against the `nmoga`
-nation, with tokens persisted to a Railway volume at `/data`.
+Live at `https://nmoga-nationbuilder-mcp-production.up.railway.app/mcp` (Streamable HTTP
+only — legacy `/sse` is deleted; nothing used it besides the removed shared-secret gate).
 
-**HTTP endpoint auth (separate from the above — this gates who can reach the server at
-all):** every route except `/health` and `/oauth/callback` requires either `MCP_URL_SECRET`
-as a URL path segment (`/mcp/<secret>`, `/sse/<secret>`, `/oauth/<secret>/authorize`,
-`/oauth/<secret>/status`) or a Bearer `MCP_AUTH_TOKEN` header on the bare path. See
-`src/utils/httpAuth.ts` and the CHANGELOG entry below. Check `/oauth/<secret>/status` for
-NationBuilder auth and token-store state; `/health` for liveness (unauthenticated, for
-Railway's health probe).
+**Auth model:** this server plays two OAuth roles at once —
+
+1. **Authorization Server to claude.ai**, mounted via the MCP SDK's own `mcpAuthRouter`
+   (`/authorize`, `/token`, `/register`, `/.well-known/*`). Issues stateless HMAC tokens
+   (`mcp_at_…`/`mcp_rt_…`, signed with `MCP_TOKEN_SIGNING_SECRET`) bound to a `userKey`.
+2. **OAuth client to NationBuilder** (`src/oauth.ts` + `src/auth/provider.ts`), driving each
+   person through NationBuilder's real login when they connect.
+
+Per-user NationBuilder credentials live in `src/auth/store.ts`, persisted to the Railway
+volume at `/data/nb-tokens.json` (one file, all users, synchronous+fsync'd writes). Session
+ownership is re-checked on every `/mcp` request, not just at creation — see CHANGELOG.md's
+"why" for that check. `/oauth/status` is public but tiered: no secrets in the baseline body,
+your own record only behind your own bearer. `/health` is unauthenticated liveness only.
 
 ## Completed
 
-- [x] **HTTP endpoints authenticated (2026-08-12, URGENT security fix):** `/mcp` and `/sse` were completely open in production — anyone with the URL got all 47 tools with the org's OAuth token (full member PII plus write tools). `/oauth/authorize` and `/oauth/status` were equally open. Fixed with a secret-path route (`MCP_URL_SECRET`, since claude.ai org connectors can't send headers) plus a Bearer `MCP_AUTH_TOKEN` check on the bare routes — either credential works. `/oauth/callback` stays unauthenticated and at its existing path (NationBuilder's registered callback URL points there; it's protected by the CSRF state check instead). Streamable HTTP sessions are now capped at 100 concurrent. **Not yet deployed — see To-Do.** See CHANGELOG.md.
+- [x] **Per-user NationBuilder OAuth (2026-08-12):** replaces the URL-secret gate below entirely. `/mcp` now requires a real, individual NationBuilder login per person — see "Current Status" above for the architecture and CHANGELOG.md for the full list of what changed. Verified end-to-end against a scripted fake NationBuilder upstream (no live nation credential needed): the full register→authorize→NB→callback→token round trip, single-use code + PKCE-mismatch rejection, refresh rotation, identity-key stability across re-authorization, **the session-hijack test** (person B's own valid bearer + person A's session id → `403`, person A's session keeps working after), the per-user session cap, `/oauth/status` tiering, and the HTTP-mode boot refusal when a static token is set. **Not yet deployed — see the URGENT To-Do below**, which also covers what's still unverifiable without a live nation and without Josh's action in claude.ai/Railway.
+- [x] **HTTP endpoints authenticated (2026-08-12, URGENT security fix, superseded by the above):** `/mcp` and `/sse` were completely open in production — anyone with the URL got all 47 tools with the org's OAuth token (full member PII plus write tools). `/oauth/authorize` and `/oauth/status` were equally open. Originally fixed with a secret-path route (`MCP_URL_SECRET`) plus a Bearer `MCP_AUTH_TOKEN` check — but `MCP_URL_SECRET` was never set on Railway, so this deployed as an outage rather than a fix, which is why the per-user OAuth work above replaces it rather than patching it. Streamable HTTP session cap (100 concurrent) carried forward. See CHANGELOG.md.
 - [x] Project scaffolding (package.json, tsconfig, directory structure)
 - [x] TypeScript types for all NationBuilder resources (JSON:API spec)
 - [x] Rate limiter (250 req/10s sliding window)
@@ -42,10 +55,43 @@ Railway's health probe).
 
 ## To-Do
 
-- [ ] **URGENT — coordinate the auth-fix deploy (2026-08-12).** This branch requires Josh to: (1) set `MCP_URL_SECRET` on Railway (a long random value — `openssl rand -hex 32` or similar); (2) deploy; (3) update the claude.ai org Connector URL from the bare `/mcp` to `/mcp/<that value>` **at the same time** — the bare `/mcp` route now demands a Bearer header the connector can't send, so the connector goes dark the moment this deploys unless the URL is updated in the same window. Not something this session can do (Railway env + claude.ai connector config are Josh's to change). See CHANGELOG.md and the PR/branch for the actual code.
+- [ ] **URGENT — coordinate the per-user-OAuth deploy.** Unlike the previous fix, the
+  connector is *already* dark (production is down right now, and has been since the
+  URL-secret deploy), so there's no "second outage" risk to sequence around — but these
+  steps still need to happen, roughly in order:
+  1. Set `MCP_TOKEN_SIGNING_SECRET` on Railway (`openssl rand -base64 48`) — recommended,
+     not required (a secret is auto-generated and persisted if absent, but explicit avoids
+     the ephemeral-secret failure mode entirely).
+  2. Delete `MCP_URL_SECRET` and `MCP_AUTH_TOKEN` from Railway env — dead vars, no code
+     reads them anymore.
+  3. Confirm the NationBuilder app's registered OAuth callback is still exactly
+     `https://<railway-domain>/oauth/callback` (Settings → Developer → Your apps) — the
+     code deliberately never moved this path, so no NationBuilder-side change *should* be
+     needed, but it's worth eyeballing.
+  4. Deploy this branch to `main`.
+  5. **Every team member (and every non-team person using this MCP) adds their own
+     personal claude.ai connector** pointed at the bare `https://…/mcp` URL and completes
+     the NationBuilder login themselves. This is a one-time re-add per person — there is no
+     org-wide connector anymore.
+  6. **Acceptance test:** have one person run a write tool, then check NationBuilder's own
+     audit log and confirm it names that person, not a shared service account. That's the
+     actual point of this whole change.
+  7. Once at least two people are confirmed working, remove `NATIONBUILDER_ACCESS_TOKEN`/
+     `NATIONBUILDER_REFRESH_TOKEN` from Railway if either is still set (HTTP mode already
+     refuses to boot with them present, so this is really just tidying env vars, not a
+     behavior change).
+  None of this can happen from this session — Railway env, the NationBuilder app config,
+  and every person's own claude.ai connector are Josh's (and each teammate's) to change.
+- [ ] **Cannot be verified without a live nation / without Josh:** whether
+  `/api/v1/people/me` actually exists on the `nmoga` nation (decides identity Tier 1 vs. 2/3
+  — non-blocking, attribution works either way, only display labels differ); whether
+  claude.ai actually performs Dynamic Client Registration against this server in practice,
+  and with which exact `redirect_uri` (only observable by watching `/register` during a
+  real connect attempt — fall back to `MCP_STATIC_CLIENT_ID` if it doesn't); and the
+  acceptance test itself (two different real people doing real writes, compared against
+  NationBuilder's actual audit log).
 - [x] Deploy to Railway — done long ago; this list was stale
-- [x] Set Railway env vars — done. `RAILWAY_API_TOKEN` is now **unused** (persistence moved to the volume) and can be deleted. `MCP_AUTH_TOKEN` is set and, as of 2026-08-12, **is now read** — it's checked as a Bearer credential on the bare `/mcp`/`/sse`/`/oauth/*` routes (see the URGENT item above for what else needs to happen before this actually protects anything in production).
-- [x] Configure Claude Desktop — in use as an org Connector
+- [x] Configure Claude Desktop — in use as a personal connector per person (was an org Connector; superseded, see above)
 - [x] Token persistence proven across a restart (2026-08-11) — volume at `/data`, verified by restarting the service and watching it come back authenticated with no human action
 - [ ] Test all 47 tools end-to-end against live NationBuilder — the phone_number/mobile_number/registered_address field-name fix (2026-08-12) and the new extra_fields[signups] client support haven't been exercised live yet; needs either a redeploy or a local static token
 - [x] Add error reporting (error-reporter.ts) — 2026-08-11: full coverage (process/exit paths, all three Express routes, remaining OAuth paths, client retry diagnostics) with throttling and PII/secret scrubbing; see CHANGELOG.md

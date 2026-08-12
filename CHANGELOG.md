@@ -1,5 +1,112 @@
 # Changelog
 
+## [2026-08-12] — Per-user NationBuilder OAuth (replaces the shared-secret gate)
+
+Same-day follow-up to the URL-secret fix below: after shipping it, the org
+connector went dark in production because `MCP_URL_SECRET` was never set on
+Railway — an outage the fix's own coordination requirement predicted but
+didn't prevent in time. Rather than restore the secret-URL model, this
+rebuilds the whole auth story around what the security review's real goal
+was: NationBuilder attribution per person, not a better-hidden shared
+credential.
+
+### Changed
+- **`/mcp` now requires a per-user NationBuilder login**, not a shared secret.
+  This server is an OAuth 2.1 Authorization Server to claude.ai (mounted via
+  the MCP SDK's own `mcpAuthRouter` at `/authorize`, `/token`, `/register`,
+  `/.well-known/*`) as well as an OAuth client to NationBuilder. Each person
+  adds this MCP as their **own personal** claude.ai connector — no
+  Organization Connector, no shared secret — and completes a real
+  NationBuilder login through claude.ai's standard OAuth handshake. Every
+  tool call then runs under that specific person's NationBuilder access
+  token, so NationBuilder's own audit log attributes every read and write to
+  the real person instead of one shared service account.
+- **Deleted:** `src/utils/httpAuth.ts`, the `MCP_URL_SECRET`/`MCP_AUTH_TOKEN`
+  shared-secret gate, the secret-path routes (`/mcp/:secret`, `/sse/:secret`,
+  `/oauth/:secret/authorize`), and the legacy SSE transport entirely
+  (`/sse`, `/messages` — claude.ai only ever used Streamable HTTP). All of it
+  is superseded by the Authorization Server or had no remaining caller.
+- **The MCP tokens this server issues are stateless HMACs** (`mcp_at_…`/
+  `mcp_rt_…`, signed with `MCP_TOKEN_SIGNING_SECRET`), not JWTs and not a
+  server-side lookup table — a Railway redeploy doesn't invalidate live
+  sessions the way an in-memory token map would.
+- **Dynamic Client Registration is enabled with a redirect-origin
+  allowlist** (`claude.ai`/`claude.com`/loopback only). The SDK's own DCR
+  handler accepts any `redirect_uris` with no validation — without the
+  allowlist, an attacker could register a client pointing at their own
+  domain, phish a legitimate NationBuilder admin into authorizing what looks
+  like this server, and redeem the resulting code for an MCP token carrying
+  that admin's NationBuilder permissions.
+- **Session ownership is re-checked on every `/mcp` request**, not only at
+  session creation. A Streamable HTTP session's `McpServer` (and the
+  NationBuilder client inside it) is bound once, at creation, to whoever
+  created it — without a live per-request check, a second person who somehow
+  obtained a session id could ride it to act, silently, as the session's
+  original owner. A mismatch now returns `403 invalid_session_owner` and is
+  reported.
+- **Per-user session cap (10)** added alongside the existing global cap
+  (100), so one runaway or buggy client can't consume the whole pool and
+  503 everyone else.
+- **`/oauth/status` is now public but tiered**: the baseline body carries no
+  secrets (connected-user count, whether any need re-authorization, store
+  writability); a valid bearer additionally surfaces that caller's own
+  record. No admin credential was introduced to gate it — see
+  PROJECT-STATUS.md for why.
+- **Identity has no NationBuilder-provided source** — confirmed against
+  NationBuilder's own docs, there is no current-user/userinfo endpoint, and
+  the OAuth token response carries no subject. A best-effort probe
+  (NationBuilder's legacy V1 `people/me`) supplies a real label and a stable
+  key when it succeeds; a DCR-client-derived key or an opaque random key
+  covers the cases it doesn't. Attribution in NationBuilder's own logs works
+  in all three tiers, since it comes from the token itself, not this lookup.
+- **HTTP mode refuses to boot** if `NATIONBUILDER_ACCESS_TOKEN` or
+  `NATIONBUILDER_REFRESH_TOKEN` is set — a leftover static token can no
+  longer reach any tool call, and an inert credential that looks like a
+  fallback is exactly the ambiguity this migration exists to close. stdio/
+  local Claude Desktop use is unaffected.
+- `/health` simplified to `{status, name, oauthConfigured}` — dropped the
+  auth-method status field along with the static-token fallback it used to
+  describe.
+
+### Added
+- `src/auth/store.ts` — per-user credential store (NationBuilder access/
+  refresh pairs keyed by person, the MCP token-signing secret, and any
+  dynamically-registered OAuth clients), replacing the single module-global
+  token. Synchronous, fsync'd, unique-temp-name writes — durability matters
+  here specifically because NationBuilder refresh tokens are single-use, so
+  a lost write strands that person until they re-authorize by hand.
+- `src/auth/tokens.ts`, `src/auth/provider.ts`, `src/auth/wellKnown.ts` —
+  the Authorization Server itself: token signing/verification, the
+  two-legged OAuth flow (claude.ai leg and NationBuilder leg kept
+  completely separate — verified live that the NationBuilder-facing
+  redirect leaks neither claude's `state` nor its PKCE challenge), and the
+  two well-known aliases the SDK's router doesn't serve on its own.
+- Per-user refresh: in-flight dedupe (two concurrent requests refreshing the
+  same person's token share one upstream call — NationBuilder refresh
+  tokens are single-use, so a real race would otherwise strand whichever
+  request lost) and a 30s negative cache. Verified directly: 3 concurrent
+  refresh calls for one person produce exactly one HTTP request upstream,
+  and a person whose refresh token is already dead (`invalid_grant`) never
+  triggers a second network call.
+- Rate limiter hoisted to a per-nation-slug singleton — NationBuilder's
+  250 req/10s limit is per IP, shared by every connected person on this
+  container; the old per-session instantiation gave each session its own
+  200/10s budget, which a handful of sessions could already exceed.
+
+### Fixed
+- A persistently-401 request used to trigger two refresh attempts instead
+  of one (the terminal-failure check only recognized one of the two error
+  message prefixes the client actually throws).
+- The "re-authorize here" link the API client printed on a dead token
+  pointed at `/oauth/authorize`, which the URL-secret fix (below) had
+  already turned into a 404. Replaced with instructions to reconnect the
+  connector in claude.ai.
+
+See PROJECT-STATUS.md for the full endpoint map, what's verified vs. what
+still needs Josh (Railway env vars, the actual claude.ai connector
+reconfiguration, and the live NationBuilder attribution acceptance test),
+and the alternatives considered.
+
 ## [2026-08-12] — HTTP endpoints authenticated (URGENT security fix)
 
 A code review the same day found `/mcp` and `/sse` were completely unauthenticated in production: anyone with the URL got all 47 tools running with the org's OAuth token — full member PII (names, emails, phones, addresses, donations, support levels) plus write tools (`update_person`, `remove_tags_from_person`, list removals). `MCP_AUTH_TOKEN` was already set in Railway env but nothing in `src/` read it. `/oauth/authorize` and `/oauth/status` were equally open: any visitor could view token expiry/store-path/writability, or initiate an OAuth flow that — completed with any NationBuilder login on the nation — replaces the server's working token.

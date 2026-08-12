@@ -85,9 +85,24 @@ npm install
 npm run build
 ```
 
-### Claude Desktop Configuration
+### Connecting — per-person NationBuilder login, no shared credential
 
-**Remote (Railway-hosted):**
+This server is a personal connector, not an org-wide one: **each person adds
+it as their own claude.ai connector and logs into NationBuilder themselves.**
+There is no shared secret, no URL-embedded credential, and no admin-run
+authorize step — the server is an OAuth Authorization Server to claude.ai
+(mounted at `/authorize`, `/token`, `/register`, `/.well-known/*`) as well as
+an OAuth client to NationBuilder. Every tool call runs under *that person's*
+own NationBuilder access token, so NationBuilder's own logs attribute every
+read and write to the real person, not a shared service account.
+
+**claude.ai (recommended):** Settings → Connectors → Add custom connector →
+paste `https://your-railway-url.up.railway.app/mcp` (no path suffix, no
+secret). Connect, and claude.ai will walk you through NationBuilder's real
+login screen. Each teammate repeats this with their own account.
+
+**Claude Desktop, via `mcp-remote`** (also drives the same OAuth flow, opening
+a browser for the NationBuilder login):
 
 ```json
 {
@@ -96,14 +111,15 @@ npm run build
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://your-railway-url.up.railway.app/sse"
+        "https://your-railway-url.up.railway.app/mcp"
       ]
     }
   }
 }
 ```
 
-**Local development:**
+**Local stdio development** (no OAuth — a static token, for working on the
+tools themselves):
 
 ```json
 {
@@ -122,33 +138,35 @@ npm run build
 
 ### Environment Variables
 
+See `.env.example` for the full annotated list. The essentials:
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `NATIONBUILDER_SLUG` | Yes | Your NationBuilder nation slug |
-| `NATIONBUILDER_ACCESS_TOKEN` | Yes | API test token from NB Settings. In OAuth mode this is only a first-boot fallback — the token file on the volume takes precedence once it exists. |
-| `NATIONBUILDER_CLIENT_ID` / `NATIONBUILDER_CLIENT_SECRET` | OAuth only | Enables the `/oauth/*` routes |
-| `NATIONBUILDER_REFRESH_TOKEN` | No | First-boot fallback only, same as the access token above |
-| `TOKEN_STORE_PATH` | No | Overrides where tokens are persisted. Defaults to `$RAILWAY_VOLUME_MOUNT_PATH/nb-tokens.json`. |
-| `PORT` | No | HTTP port for SSE mode (Railway sets automatically) |
-| `MCP_URL_SECRET` | HTTP mode — required in production | Long random path segment. Every HTTP route except `/health` and `/oauth/callback` is gated behind this-as-a-URL-segment (`/mcp/<secret>`, `/sse/<secret>`, `/oauth/<secret>/authorize`, `/oauth/<secret>/status`) or `MCP_AUTH_TOKEN` (below) — claude.ai org connectors can't send custom headers, so the URL itself has to carry the credential for that caller. |
-| `MCP_AUTH_TOKEN` | No | Bearer token accepted as an alternative to `MCP_URL_SECRET` on the bare (non-secret-path) routes — `Authorization: Bearer <token>`. For callers that can send headers: mcp-remote, curl, local dev. |
+| `NATIONBUILDER_ACCESS_TOKEN` | stdio mode only | Static token for local/Claude Desktop stdio use. **HTTP mode refuses to boot if this is set** — per-user OAuth is the only path to `/mcp` now. |
+| `NATIONBUILDER_CLIENT_ID` / `NATIONBUILDER_CLIENT_SECRET` | HTTP mode — required | Registers this server as a NationBuilder OAuth app; every connecting person authorizes through NationBuilder's own login. |
+| `NATIONBUILDER_OAUTH_CALLBACK_URL` | No | Falls back to `https://$RAILWAY_PUBLIC_DOMAIN/oauth/callback`. This is the one path registered with NationBuilder's app config. |
+| `MCP_TOKEN_SIGNING_SECRET` | HTTP mode — recommended | Signs the tokens this server issues to claude.ai. Auto-generated and persisted if unset, but explicit is safer — see `.env.example`. |
+| `TOKEN_STORE_PATH` | No | Overrides where the per-user credential store is persisted. Defaults to `$RAILWAY_VOLUME_MOUNT_PATH/nb-tokens.json`. |
+| `PORT` | No | HTTP port (Railway sets automatically); presence selects HTTP mode over stdio. |
 
-### Token persistence (OAuth mode) — requires a volume
+### Token persistence — requires a volume
 
-NationBuilder rotates the refresh token on every refresh, so the persisted copy
-is the only way back after a restart. This service writes tokens to
-`$RAILWAY_VOLUME_MOUNT_PATH/nb-tokens.json` (mode `0600`, written via a temp
-file + rename so a crash can't truncate it).
+NationBuilder rotates each person's refresh token on every refresh, so the
+persisted copy is the only way back after a restart. This service writes the
+per-user credential store to `$RAILWAY_VOLUME_MOUNT_PATH/nb-tokens.json`
+(mode `0600`, written via a temp file + rename so a crash can't truncate it).
 
-**A volume must be mounted or tokens live in memory only** — the service will
-come up, work fine, and then lose NationBuilder access on its next restart until
-someone re-runs `/oauth/authorize`. The production service has a volume at
-`/data`. If persistence isn't working you'll see a `CRITICAL:` line in the deploy
-logs, and the `/oauth/callback` success page says so explicitly.
+**A volume must be mounted or every connected person's session lives in
+memory only** — the service will come up, work fine, and then force everyone
+to reconnect their connector and log into NationBuilder again on the next
+restart. The production service has a volume at `/data`. If persistence isn't
+working you'll see a `CRITICAL:` line in the deploy logs.
 
-Check current auth state any time at `/oauth/<secret>/status` (see `MCP_URL_SECRET`
-above; `/oauth/authorize`/`/oauth/status` require the same credential — see
-"Environment Variables" above).
+Check current status any time at `/oauth/status` — public but tiered: the
+baseline body has no secrets (connected-user count, whether any need
+re-authorization, store writability); present your own bearer token and it
+additionally shows your own record.
 
 ## Development
 
