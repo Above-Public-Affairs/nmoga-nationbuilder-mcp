@@ -23,6 +23,10 @@ import { createNationBuilderClient } from "./client/nationbuilder.js";
 import type { NationBuilderClientOptions } from "./client/nationbuilder.js";
 import { bootstrapToken, createOAuthRouter, forceRefreshToken, getOAuthToken, initTokenFromEnv, isOAuthConfigured, sweepUserTokens } from "./oauth.js";
 import { getStoreStatus } from "./auth/store.js";
+import { createNationBuilderOAuthProvider } from "./auth/provider.js";
+import { wellKnownAliasRouter, mcpCorsMiddleware } from "./auth/wellKnown.js";
+import { publicBaseUrl } from "./auth/tokens.js";
+import { mcpAuthRouter, createOAuthMetadata } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { reportError, reportErrorThrottled, reportAndFlush, safeErr } from "./utils/errorReporter.js";
 import { getMcpUrlSecret, isAuthorized } from "./utils/httpAuth.js";
 import { registerSignupTools } from "./tools/signups.js";
@@ -178,6 +182,43 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
   // `true` trusts every hop in X-Forwarded-For, which lets any caller spoof
   // their own IP and defeats per-IP rate limiting outright.
   app.set("trust proxy", 1);
+
+  // The Authorization Server this MCP server presents to claude.ai, backed
+  // by each connecting person's own real NationBuilder login (see
+  // src/auth/provider.ts). Mounted unconditionally and at the app root, per
+  // the SDK's own requirement for mcpAuthRouter — /authorize will itself
+  // redirect with an error if NationBuilder OAuth isn't configured, rather
+  // than this needing a conditional mount.
+  //
+  // NOT YET the thing that gates /mcp — that's a later change, once this has
+  // been exercised end-to-end. Today's /mcp gate (MCP_URL_SECRET/
+  // MCP_AUTH_TOKEN, below) is unaffected by mounting this.
+  app.use(mcpCorsMiddleware);
+  const nbOAuthProvider = createNationBuilderOAuthProvider();
+  const issuerUrl = new URL(publicBaseUrl());
+  const resourceServerUrl = new URL(`${publicBaseUrl()}/mcp`);
+  const oauthMetadata = createOAuthMetadata({
+    provider: nbOAuthProvider,
+    issuerUrl,
+    scopesSupported: ["nationbuilder"],
+  });
+  app.use(
+    mcpAuthRouter({
+      provider: nbOAuthProvider,
+      issuerUrl,
+      resourceServerUrl,
+      scopesSupported: ["nationbuilder"],
+      resourceName: "NMOGA NationBuilder",
+    })
+  );
+  app.use(
+    wellKnownAliasRouter({
+      oauthMetadata,
+      resourceServerUrl,
+      scopesSupported: ["nationbuilder"],
+      resourceName: "NMOGA NationBuilder",
+    })
+  );
 
   // Token getter: prefer OAuth token, fall back to static token
   const getToken = (): string => {
@@ -549,6 +590,16 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     console.error(`Health check: http://localhost:${port}/health`);
     if (isOAuthConfigured()) {
       console.error(`OAuth (gated): http://localhost:${port}/oauth/<MCP_URL_SECRET>/authorize`);
+    }
+    // Live, but not yet load-bearing: /mcp still gates on MCP_URL_SECRET/
+    // MCP_AUTH_TOKEN above, not on tokens issued here. See index.ts's
+    // mcpAuthRouter mount comment.
+    {
+      const issuerBase = issuerUrl.href.replace(/\/+$/, "");
+      console.error(
+        `Per-user Authorization Server mounted (not yet gating /mcp): ` +
+        `${issuerBase}/authorize, ${issuerBase}/token, ${issuerBase}/.well-known/oauth-authorization-server`
+      );
     }
 
     // State the persistence situation at boot. A missing volume otherwise only

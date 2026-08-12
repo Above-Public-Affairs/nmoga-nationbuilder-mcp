@@ -1,37 +1,36 @@
 /**
  * OAuth 2.0 flow for NationBuilder.
  *
- * Adds /oauth/authorize and /oauth/callback routes.
+ * Two authorize flows share this file's one NationBuilder-facing plumbing
+ * (getConfig/getNbOAuthBaseUrl/exchangeCodeForNbTokens/probeNationBuilderIdentity)
+ * and its one `/oauth/callback` route, since that path is registered with
+ * NationBuilder and can't be duplicated:
  *
- * As of this commit, refresh/persistence internals are backed by the
- * per-user store in ./auth/store.ts rather than a single module-global
- * token. Externally nothing has changed yet — every route and export here
- * still operates on exactly one identity, `LEGACY_USER_KEY`, so this is a
- * plumbing swap, not a behavior change. The routes below become genuinely
- * per-user once the Authorization Server (src/auth/provider.ts) replaces
- * `/oauth/:secret/authorize` with claude.ai's own OAuth handshake, at which
- * point `LEGACY_USER_KEY` only ever refers to whatever was migrated from
- * the pre-per-user token file, if anything was.
+ *   - The legacy shared flow (`/oauth/:secret/authorize` below) — the
+ *     pre-per-user gate, writing into the single `LEGACY_USER_KEY` identity.
+ *     Kept alive only until the gate flips to the Authorization Server;
+ *     nothing new should be built against it.
+ *   - The Authorization Server's own upstream leg (src/auth/provider.ts) —
+ *     each connecting person's real, individual NationBuilder login. This
+ *     is the one everything is migrating to.
+ *
+ * `/oauth/callback` distinguishes the two by checking which flow's pending-
+ * auth map recognizes the incoming `state` (see hasPendingUpstreamAuth()).
+ * There is no ambiguity risk: each flow generates its own random state into
+ * its own map, so a collision would require guessing a live 24-byte value.
  *
  * Security: CSRF state parameter, PKCE (S256), HTML output escaping.
  */
 
 import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
-import { randomBytes, createHash } from "crypto";
+import { randomBytes } from "crypto";
 import { reportError, reportErrorThrottled, resetThrottle, safeErr } from "./utils/errorReporter.js";
 import { isAuthorized } from "./utils/httpAuth.js";
 import * as tokenStore from "./auth/store.js";
 import { LEGACY_USER_KEY } from "./auth/store.js";
-
-// --- PKCE helpers ---
-function generateCodeVerifier(): string {
-  return randomBytes(32).toString("base64url");
-}
-
-function generateCodeChallenge(verifier: string): string {
-  return createHash("sha256").update(verifier).digest("base64url");
-}
+import { generateCodeVerifier, generateCodeChallenge } from "./auth/tokens.js";
+import { hasPendingUpstreamAuth, completeUpstreamAuth } from "./auth/provider.js";
 
 // --- CSRF state + PKCE storage (keyed by state value, expires after 10 min) ---
 interface PendingAuth {
@@ -58,6 +57,15 @@ function escapeHtml(str: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function errorPage(title: string, message: string): string {
+  return `
+    <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
+      <h2>${escapeHtml(title)}</h2>
+      <p>${message}</p>
+    </body></html>
+  `;
 }
 
 /**
@@ -88,6 +96,17 @@ export function getConfig() {
       : null);
 
   return { slug, clientId, clientSecret, callbackUrl };
+}
+
+/**
+ * NationBuilder's own OAuth host for this nation. Overridable via
+ * NB_OAUTH_BASE_URL so local verification can point this whole flow at a
+ * throwaway fake upstream instead of the real nation — the only way to
+ * exercise the authorize -> callback -> token-exchange round trip without a
+ * live NationBuilder credential.
+ */
+export function getNbOAuthBaseUrl(slug: string): string {
+  return process.env.NB_OAUTH_BASE_URL || `https://${slug}.nationbuilder.com`;
 }
 
 /** Returns true if OAuth env vars are configured */
@@ -123,6 +142,136 @@ export function initTokenFromEnv(): void {
 /** Returns the current (legacy-identity) OAuth access token, or null. */
 export function getOAuthToken(): string | null {
   return tokenStore.getUserAccessToken(LEGACY_USER_KEY);
+}
+
+// --- NationBuilder token exchange (shared by both authorize flows) --------
+
+export type NbTokenExchangeResult =
+  | { ok: true; accessToken: string; refreshToken: string | null; expiresAt: number; tokenType: string; scope?: string }
+  | { ok: false; httpStatus: number; errorCode: string | null };
+
+/**
+ * Exchange an authorization code for a NationBuilder token pair. Shared by
+ * the legacy flow's callback handling and the Authorization Server's leg-2
+ * completion (auth/provider.ts) — there is exactly one way this server
+ * talks to NationBuilder's token endpoint, regardless of which flow got a
+ * person here.
+ */
+export async function exchangeCodeForNbTokens(code: string, codeVerifier: string): Promise<NbTokenExchangeResult> {
+  const { slug, clientId, clientSecret, callbackUrl } = getConfig();
+  if (!clientId || !clientSecret || !callbackUrl) {
+    return { ok: false, httpStatus: 500, errorCode: "server_not_configured" };
+  }
+
+  try {
+    const tokenResponse = await fetch(`${getNbOAuthBaseUrl(slug)}/oauth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "authorization_code",
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: callbackUrl,
+        code_verifier: codeVerifier,
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const text = await tokenResponse.text();
+      // Never log or report `text` raw — the request body we just sent
+      // contains client_secret, code, and code_verifier, and
+      // NationBuilder's error response can echo them back.
+      const errorCode = oauthErrorCode(text);
+      console.error(`Token exchange failed: HTTP ${tokenResponse.status}${errorCode ? ` (${errorCode})` : ""}`);
+      // Unthrottled: reaching this requires a `state` we issued, so volume
+      // is bounded by real authorize attempts, not by internet scanners.
+      reportError({
+        category: "auth_error",
+        message: "oauth_callback: token exchange rejected",
+        context: { http_status: tokenResponse.status, oauth_error: errorCode },
+      });
+      return { ok: false, httpStatus: tokenResponse.status, errorCode };
+    }
+
+    const data = (await tokenResponse.json()) as {
+      access_token: string;
+      token_type: string;
+      refresh_token?: string;
+      expires_in?: number;
+      scope?: string;
+    };
+
+    return {
+      ok: true,
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token ?? null,
+      // Default to a 23h fuse (NB tokens live 24h) rather than "never" when
+      // expires_in is absent — see the same default in doRefreshUser() below.
+      expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : Date.now() + 23 * 60 * 60 * 1000,
+      tokenType: data.token_type,
+      scope: data.scope,
+    };
+  } catch (err) {
+    // A SyntaxError parsing a 200 response quotes the offending body in its
+    // message, which can contain the access token — never pass it through as-is.
+    const safe = err instanceof SyntaxError
+      ? new Error("SyntaxError parsing token response (body withheld)")
+      : err;
+    console.error("OAuth token exchange error:", safeErr(safe));
+    reportError({ category: "auth_error", message: "oauth_callback: token exchange failed", rawError: safe });
+    return { ok: false, httpStatus: 0, errorCode: null };
+  }
+}
+
+export interface NbIdentityProbe {
+  nbUserId: string;
+  label: string | null;
+}
+
+/**
+ * Best-effort identity probe: try NationBuilder's legacy V1 `people/me` to
+ * learn who just authorized. There is no V2 equivalent — NationBuilder's own
+ * docs describe no current-user/userinfo endpoint, and the OAuth token
+ * response itself carries no subject, just `{access_token, refresh_token,
+ * token_type, expires_in, scope, created_at}`. So this is genuinely
+ * best-effort: a null return means "use an opaque key," not an error.
+ *
+ * Deliberately bypasses the API client/rate limiter/error reporter — a
+ * failed probe must be silent and free, since attribution in NationBuilder's
+ * own logs comes from the access token itself, not from this lookup. The
+ * label this produces is cosmetic.
+ */
+export async function probeNationBuilderIdentity(slug: string, accessToken: string): Promise<NbIdentityProbe | null> {
+  const base = getNbOAuthBaseUrl(slug);
+  const url = `${base}/api/v1/people/me`;
+
+  try {
+    let response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      // V1 has traditionally also accepted the token as a query param —
+      // try once more before giving up.
+      response = await fetch(`${url}?access_token=${encodeURIComponent(accessToken)}`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+    }
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as {
+      person?: { id?: number | string; first_name?: string; last_name?: string; email?: string };
+    };
+    const person = data.person;
+    if (!person?.id) return null;
+
+    const name = [person.first_name, person.last_name].filter(Boolean).join(" ").trim();
+    return { nbUserId: String(person.id), label: name || person.email || null };
+  } catch {
+    return null;
+  }
 }
 
 // --- Refresh ---------------------------------------------------------------
@@ -195,7 +344,7 @@ async function doRefreshUser(userKey: string): Promise<boolean> {
   console.error(`Refreshing NationBuilder token for ${tag}...`);
 
   try {
-    const response = await fetch(`https://${slug}.nationbuilder.com/oauth/token`, {
+    const response = await fetch(`${getNbOAuthBaseUrl(slug)}/oauth/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -360,10 +509,10 @@ export async function bootstrapToken(): Promise<void> {
  * 404, not 401: a wrong path segment shouldn't confirm that a gated route
  * exists at all.
  *
- * This gate — and the routes it protects — are the pre-per-user shared flow
- * and are superseded once the Authorization Server (src/auth/provider.ts)
- * ships; kept working as-is until then so there's a single migration point
- * rather than two.
+ * This gate — and the route it protects — is the pre-per-user shared flow
+ * and is dead code the moment the gate flips to the Authorization Server;
+ * kept working as-is until then so there's a single migration point rather
+ * than two.
  */
 function requireOauthAuth(req: Request, res: Response, next: NextFunction): void {
   if (isAuthorized(req, req.params.oauthSecret)) {
@@ -377,7 +526,8 @@ function requireOauthAuth(req: Request, res: Response, next: NextFunction): void
 export function createOAuthRouter(): Router {
   const router = Router();
 
-  // GET /oauth/:oauthSecret/authorize — redirect user to NationBuilder consent screen
+  // GET /oauth/:oauthSecret/authorize — the legacy shared flow: redirects to
+  // NationBuilder's consent screen and, on return, sets LEGACY_USER_KEY.
   router.get("/oauth/:oauthSecret/authorize", requireOauthAuth, (_req, res) => {
     const { slug, clientId, callbackUrl } = getConfig();
 
@@ -399,9 +549,7 @@ export function createOAuthRouter(): Router {
     cleanupPendingAuths();
     pendingAuths.set(state, { codeVerifier, createdAt: Date.now() });
 
-    const authorizeUrl = new URL(
-      `https://${slug}.nationbuilder.com/oauth/authorize`
-    );
+    const authorizeUrl = new URL(`${getNbOAuthBaseUrl(slug)}/oauth/authorize`);
     authorizeUrl.searchParams.set("response_type", "code");
     authorizeUrl.searchParams.set("client_id", clientId);
     authorizeUrl.searchParams.set("redirect_uri", callbackUrl);
@@ -412,7 +560,10 @@ export function createOAuthRouter(): Router {
     res.redirect(authorizeUrl.toString());
   });
 
-  // GET /oauth/callback — exchange code for access token
+  // GET /oauth/callback — NationBuilder's registered redirect target for
+  // BOTH authorize flows (see the module comment at the top of this file).
+  // The path can never change without re-registering it with NationBuilder,
+  // so both flows must land here and this route dispatches between them.
   router.get("/oauth/callback", async (req, res) => {
     const code = req.query.code as string | undefined;
     const error = req.query.error as string | undefined;
@@ -434,51 +585,29 @@ export function createOAuthRouter(): Router {
           throttleMs: 60 * 60 * 1000,
         });
       }
-      res.status(400).send(`
-        <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
-          <h2>Authorization Denied</h2>
-          <p>NationBuilder returned error: <code>${escapeHtml(error)}</code></p>
-        </body></html>
-      `);
+      res.status(400).send(errorPage("Authorization Denied", `NationBuilder returned error: <code>${escapeHtml(error)}</code>`));
       return;
     }
 
-    // Verify CSRF state parameter
-    if (!state || !pendingAuths.has(state)) {
-      // Never echo `state` itself — treat it as opaque. Public and
-      // unauthenticated endpoint, so throttle this too.
+    if (!state) {
       reportErrorThrottled({
         category: "auth_error",
-        message: "oauth_callback: missing or expired CSRF state",
-        context: { state_present: !!state, state_length: state?.length ?? 0, pending_auths: pendingAuths.size },
+        message: "oauth_callback: missing state",
+        context: { state_present: false },
         throttleKey: "oauth_callback_bad_state",
         throttleMs: 60 * 60 * 1000,
       });
-      res.status(400).send(`
-        <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
-          <h2>Invalid State</h2>
-          <p>OAuth state parameter is missing or invalid. This may indicate a CSRF attack or an expired authorization. Please try again.</p>
-        </body></html>
-      `);
+      res.status(400).send(errorPage("Invalid State", "OAuth state parameter is missing. Please try again."));
       return;
     }
 
-    // Retrieve and consume the pending auth (one-time use)
-    const pendingAuth = pendingAuths.get(state)!;
-    pendingAuths.delete(state);
-
     if (!code) {
-      res.status(400).send(`
-        <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
-          <h2>Missing Code</h2>
-          <p>No authorization code received from NationBuilder.</p>
-        </body></html>
-      `);
+      res.status(400).send(errorPage("Missing Code", "No authorization code received from NationBuilder."));
       return;
     }
 
     // Sanitize code: NB codes should be alphanumeric with possible dashes/underscores
-    if (!/^[\w\-\.]+$/.test(code) || code.length > 512) {
+    if (!/^[\w\-.]+$/.test(code) || code.length > 512) {
       // `code` is itself a credential — length only, never the value.
       reportErrorThrottled({
         category: "auth_error",
@@ -487,126 +616,77 @@ export function createOAuthRouter(): Router {
         throttleKey: "oauth_callback_bad_code",
         throttleMs: 60 * 60 * 1000,
       });
-      res.status(400).send(`
-        <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
-          <h2>Invalid Code</h2>
-          <p>The authorization code has an unexpected format.</p>
-        </body></html>
-      `);
+      res.status(400).send(errorPage("Invalid Code", "The authorization code has an unexpected format."));
       return;
     }
 
-    const { slug, clientId, clientSecret, callbackUrl } = getConfig();
-
-    if (!clientId || !clientSecret || !callbackUrl) {
-      res.status(500).json({ error: "OAuth not configured" });
-      return;
-    }
-
-    try {
-      const tokenResponse = await fetch(
-        `https://${slug}.nationbuilder.com/oauth/token`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            grant_type: "authorization_code",
-            code,
-            client_id: clientId,
-            client_secret: clientSecret,
-            redirect_uri: callbackUrl,
-            code_verifier: pendingAuth.codeVerifier,
-          }),
-        }
-      );
-
-      if (!tokenResponse.ok) {
-        const text = await tokenResponse.text();
-        // Never log or report `text` raw — the request body we just sent
-        // contains client_secret, code, and code_verifier, and
-        // NationBuilder's error response can echo them back.
-        const exchangeErrorCode = oauthErrorCode(text);
-        console.error(`Token exchange failed: HTTP ${tokenResponse.status}${exchangeErrorCode ? ` (${exchangeErrorCode})` : ""}`);
-        // Unthrottled: reaching this requires a `state` we issued, so volume
-        // is bounded by real authorize attempts, not by internet scanners.
-        reportError({
-          category: "auth_error",
-          message: "oauth_callback: token exchange rejected",
-          context: { http_status: tokenResponse.status, oauth_error: exchangeErrorCode },
-        });
-        res.status(500).send(`
-          <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
-            <h2>Token Exchange Failed</h2>
-            <p>HTTP ${tokenResponse.status}</p>
-          </body></html>
-        `);
-        return;
+    // --- Dispatch: does `state` belong to the Authorization Server's own
+    // upstream leg, or the legacy shared flow? Each generates its own
+    // random state into its own map, so this is unambiguous.
+    if (hasPendingUpstreamAuth(state)) {
+      const result = await completeUpstreamAuth(state, code);
+      if ("redirectTo" in result) {
+        res.redirect(302, result.redirectTo);
+      } else {
+        res.status(400).send(errorPage("Authorization Failed", `Could not complete sign-in: ${escapeHtml(result.error)}. Please try connecting again.`));
       }
-
-      const data = (await tokenResponse.json()) as {
-        access_token: string;
-        token_type: string;
-        refresh_token?: string;
-        expires_in?: number;
-        scope?: string;
-        created_at?: number;
-      };
-
-      tokenStore.setUserTokens(LEGACY_USER_KEY, {
-        accessToken: data.access_token,
-        refreshToken: data.refresh_token ?? null,
-        expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : Date.now() + 23 * 60 * 60 * 1000,
-      });
-
-      const expiryInfo = data.expires_in
-        ? `Token expires in ${Math.round(data.expires_in / 3600)} hours (auto-refresh enabled).`
-        : "Token does not expire.";
-
-      // Say so on the page rather than only in the logs — whoever just clicked
-      // through is the one person positioned to fix a bad volume mount, and
-      // otherwise they'd only find out at the next restart.
-      const storeStatus = tokenStore.getStoreStatus();
-      const persistenceNote = storeStatus.writable
-        ? `<p style="color:#666;font-size:14px">Tokens saved to persistent storage — they will survive restarts.</p>`
-        : `<p style="color:#b00;font-size:14px"><strong>Warning:</strong> tokens could NOT be saved to persistent storage. ` +
-          `They are in memory only, so the next restart will require re-authorizing here again. ` +
-          `Check that a volume is mounted on this service (see the deploy logs for details).</p>`;
-
-      console.error(
-        `OAuth token obtained. Type: ${data.token_type}, Scope: ${data.scope ?? "default"}, Refresh: ${data.refresh_token ? "yes" : "no"}`
-      );
-
-      res.send(`
-        <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
-          <h2>Authorization Successful</h2>
-          <p>NationBuilder OAuth token obtained.</p>
-          <p style="color:#666;font-size:14px">${expiryInfo}</p>
-          ${persistenceNote}
-          <p style="color:#666;font-size:14px">You can close this window. The MCP server is now using your OAuth credentials.</p>
-        </body></html>
-      `);
-    } catch (err) {
-      // A SyntaxError parsing a 200 response quotes the offending body in
-      // its message, which can contain the access token — never pass it
-      // through as-is.
-      const safe = err instanceof SyntaxError
-        ? new Error("SyntaxError parsing token response (body withheld)")
-        : err;
-      console.error("OAuth callback error:", safeErr(safe));
-      // Unthrottled: reaching this requires a `state` we issued, so volume is
-      // bounded by real authorize attempts.
-      reportError({
-        category: "auth_error",
-        message: "oauth_callback: token exchange failed",
-        rawError: safe,
-      });
-      res.status(500).send(`
-        <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
-          <h2>Error</h2>
-          <p>Failed to exchange authorization code for token.</p>
-        </body></html>
-      `);
+      return;
     }
+
+    // --- Legacy shared flow ---
+    if (!pendingAuths.has(state)) {
+      // Never echo `state` itself — treat it as opaque. Public and
+      // unauthenticated endpoint, so throttle this too.
+      reportErrorThrottled({
+        category: "auth_error",
+        message: "oauth_callback: missing or expired CSRF state",
+        context: { state_length: state.length, pending_auths: pendingAuths.size },
+        throttleKey: "oauth_callback_bad_state",
+        throttleMs: 60 * 60 * 1000,
+      });
+      res.status(400).send(errorPage("Invalid State", "OAuth state parameter is missing or invalid. This may indicate a CSRF attack or an expired authorization. Please try again."));
+      return;
+    }
+
+    // Retrieve and consume the pending auth (one-time use)
+    const pendingAuth = pendingAuths.get(state)!;
+    pendingAuths.delete(state);
+
+    const result = await exchangeCodeForNbTokens(code, pendingAuth.codeVerifier);
+    if (!result.ok) {
+      res.status(500).send(errorPage("Token Exchange Failed", `HTTP ${result.httpStatus}`));
+      return;
+    }
+
+    tokenStore.setUserTokens(LEGACY_USER_KEY, {
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      expiresAt: result.expiresAt,
+    });
+
+    const expiryInfo = "Token expires in about 24 hours (auto-refresh enabled).";
+
+    // Say so on the page rather than only in the logs — whoever just clicked
+    // through is the one person positioned to fix a bad volume mount, and
+    // otherwise they'd only find out at the next restart.
+    const storeStatus = tokenStore.getStoreStatus();
+    const persistenceNote = storeStatus.writable
+      ? `<p style="color:#666;font-size:14px">Tokens saved to persistent storage — they will survive restarts.</p>`
+      : `<p style="color:#b00;font-size:14px"><strong>Warning:</strong> tokens could NOT be saved to persistent storage. ` +
+        `They are in memory only, so the next restart will require re-authorizing here again. ` +
+        `Check that a volume is mounted on this service (see the deploy logs for details).</p>`;
+
+    console.error(`OAuth token obtained for ${LEGACY_USER_KEY}. Type: ${result.tokenType}, Scope: ${result.scope ?? "default"}, Refresh: ${result.refreshToken ? "yes" : "no"}`);
+
+    res.send(`
+      <html><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center">
+        <h2>Authorization Successful</h2>
+        <p>NationBuilder OAuth token obtained.</p>
+        <p style="color:#666;font-size:14px">${expiryInfo}</p>
+        ${persistenceNote}
+        <p style="color:#666;font-size:14px">You can close this window. The MCP server is now using your OAuth credentials.</p>
+      </body></html>
+    `);
   });
 
   // GET /oauth/:oauthSecret/status — check current auth state
