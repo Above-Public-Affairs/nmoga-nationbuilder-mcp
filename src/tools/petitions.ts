@@ -15,23 +15,27 @@ export function registerPetitionTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_petitions",
-    "List all petitions in NationBuilder.",
     {
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Petitions",
+      description: "List all petitions in NationBuilder.",
+      inputSchema: {
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -65,11 +69,15 @@ export function registerPetitionTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_petition",
-    "Get full details for a specific petition by its NationBuilder ID.",
     {
-      petition_id: z.string().describe("The NationBuilder petition ID"),
+      title: "Get Petition",
+      description: "Get full details for a specific petition by its NationBuilder ID.",
+      inputSchema: {
+        petition_id: z.string().describe("The NationBuilder petition ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

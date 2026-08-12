@@ -15,23 +15,27 @@ export function registerMembershipTypeTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_membership_types",
-    "List all membership types/tiers in NationBuilder.",
     {
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Membership Types",
+      description: "List all membership types/tiers in NationBuilder.",
+      inputSchema: {
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -65,11 +69,15 @@ export function registerMembershipTypeTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_membership_type",
-    "Get full details for a specific membership type by its NationBuilder ID.",
     {
-      membership_type_id: z.string().describe("The NationBuilder membership type ID"),
+      title: "Get Membership Type",
+      description: "Get full details for a specific membership type by its NationBuilder ID.",
+      inputSchema: {
+        membership_type_id: z.string().describe("The NationBuilder membership type ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

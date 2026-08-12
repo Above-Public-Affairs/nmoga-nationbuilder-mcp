@@ -40,6 +40,8 @@ import { registerMailingTools } from "./tools/mailings.js";
 import { registerPageTools } from "./tools/pages.js";
 import { registerAutomationTools } from "./tools/automations.js";
 import { registerImportTools } from "./tools/imports.js";
+import { registerStatusTools } from "./tools/status.js";
+import { getFaviconBuffer } from "./favicon.js";
 
 // CRITICAL: Never use console.log() - it corrupts JSON-RPC on stdout
 // Always use console.error() for any logging/debugging
@@ -130,10 +132,21 @@ function validateEnv(): { slug: string; staticToken: string | null } {
 }
 
 function createServer(client: NationBuilderClient): McpServer {
+  const faviconUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/favicon.ico`
+    : "https://nmoga-nationbuilder-mcp-production.up.railway.app/favicon.ico";
+
   const server = new McpServer(
     {
       name: "nmoga-nationbuilder-mcp",
       version: "1.0.0",
+      icons: [
+        {
+          src: faviconUrl,
+          mimeType: "image/x-icon",
+          sizes: ["16x16", "32x32", "48x48"],
+        },
+      ],
     },
     {
       instructions: INSTRUCTIONS,
@@ -158,6 +171,7 @@ function createServer(client: NationBuilderClient): McpServer {
   registerPageTools(server, client);
   registerAutomationTools(server, client);
   registerImportTools(server, client);
+  registerStatusTools(server);
 
   return server;
 }
@@ -259,7 +273,17 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     );
   }
 
-  // Health check — deliberately the one route left unauthenticated, so
+  // Connector icon — distinguishes this server in the claude.ai connector
+  // list from other unbranded MCPs (see src/favicon.ts). Deliberately left
+  // unauthenticated alongside /health: it's a static image with no PII and
+  // no write capability, and there's no way for an icon-fetching client to
+  // carry a secret path segment or Bearer header anyway.
+  app.get("/favicon.ico", (_req, res) => {
+    res.type("image/x-icon");
+    res.send(getFaviconBuffer());
+  });
+
+  // Health check — deliberately the other route left unauthenticated, so
   // Railway's health probe (which sends no credentials) keeps working.
   app.get("/health", (_req, res) => {
     const oauthToken = getOAuthToken();

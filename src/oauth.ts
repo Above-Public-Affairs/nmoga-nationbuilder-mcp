@@ -281,6 +281,38 @@ export function getOAuthToken(): string | null {
 }
 
 /**
+ * Composed auth-state snapshot — backs both the /oauth/status HTTP route and
+ * the connection_status MCP tool, so the two surfaces can never drift apart.
+ */
+export function getAuthStatus(): {
+  oauthConfigured: boolean;
+  hasOAuthToken: boolean;
+  hasStaticToken: boolean;
+  activeMethod: "oauth" | "static_token" | "none";
+  tokenExpiry: string | null;
+  hasRefreshToken: boolean;
+  tokenStore: { path: string | null; writable: boolean; reason?: string };
+} {
+  const oauthConfigured = isOAuthConfigured();
+  const hasOAuthToken = !!tokenData;
+  const hasStaticToken = !!process.env.NATIONBUILDER_ACCESS_TOKEN;
+
+  return {
+    oauthConfigured,
+    hasOAuthToken,
+    hasStaticToken,
+    activeMethod: hasOAuthToken ? "oauth" : hasStaticToken ? "static_token" : "none",
+    tokenExpiry: tokenData?.expiresAt
+      ? new Date(tokenData.expiresAt).toISOString()
+      : null,
+    hasRefreshToken: !!tokenData?.refreshToken,
+    // Check this BEFORE authorizing: if writable is false, the token you're
+    // about to obtain won't survive the next restart.
+    tokenStore: getTokenStoreStatus(),
+  };
+}
+
+/**
  * The client force-refreshes on EVERY 401 — and does so twice per failed
  * request (the retry loop's error-message heuristic doesn't recognize an
  * auth failure as terminal, so it retries once more before giving up). An
@@ -681,23 +713,7 @@ export function createOAuthRouter(): Router {
 
   // GET /oauth/:oauthSecret/status — check current auth state
   router.get("/oauth/:oauthSecret/status", requireOauthAuth, (_req, res) => {
-    const oauthConfigured = isOAuthConfigured();
-    const hasOAuthToken = !!tokenData;
-    const hasStaticToken = !!process.env.NATIONBUILDER_ACCESS_TOKEN;
-
-    res.json({
-      oauthConfigured,
-      hasOAuthToken,
-      hasStaticToken,
-      activeMethod: hasOAuthToken ? "oauth" : hasStaticToken ? "static_token" : "none",
-      tokenExpiry: tokenData?.expiresAt
-        ? new Date(tokenData.expiresAt).toISOString()
-        : null,
-      hasRefreshToken: !!tokenData?.refreshToken,
-      // Check this BEFORE authorizing: if writable is false, the token you're
-      // about to obtain won't survive the next restart.
-      tokenStore: getTokenStoreStatus(),
-    });
+    res.json(getAuthStatus());
   });
 
   return router;

@@ -1,8 +1,9 @@
 /**
  * Tag tools for NationBuilder
  * - list_tags: List all tags
- * - add_tags_to_person: Add tags to a person
- * - remove_tags_from_person: Remove tags from a person
+ * - add_tags_to_person: Add tags to one or more people
+ * - remove_tags_from_person: Remove tags from one or more people
+ * - get_person_tags: Get every tag on one or more people
  * - list_people_with_tag: List people who have a specific tag
  */
 
@@ -14,34 +15,53 @@ import { formatTag, formatSignup, formatPersonTags, formatTruncationNotice, pagi
 import { reportError } from "../utils/errorReporter.js";
 import { resolveTagByName, getTaggingsPageForTagId, getTaggingsForSignupIds, getAllSignupIdsForTagId } from "../utils/tagLookup.js";
 
+// Both add_tags_to_person and remove_tags_from_person accept a roster of
+// person_ids. Every request in the batch still runs sequentially through the
+// shared RateLimiter (src/utils/rateLimiter.ts), so a very large roster risks
+// the MCP tool call itself running long enough to hit a client-side timeout
+// long before NationBuilder would ever throttle it. Cap and report clearly
+// rather than let a big call silently run for minutes.
+const MAX_BATCH_PEOPLE = 50;
+
+function parsePersonIds(personIds: string): string[] {
+  return personIds
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
 export function registerTagTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_tags",
-    "List all tags in the NationBuilder nation with optional name search.",
     {
-      query: z
-        .string()
-        .optional()
-        .describe("Filter tags by name (partial match)"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        // Default to the max: NationBuilder V2 sends no result total on this
-        // endpoint (verified live), so a smaller default risks silently
-        // truncating the tag universe before any per-tag paging even starts.
-        .default(100)
-        .describe("Results per page (defaults to the max — this endpoint reports no total, so a full page is the only warning that more tags exist)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Tags",
+      description: "List all tags in the NationBuilder nation with optional name search.",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe("Filter tags by name (partial match)"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          // Default to the max: NationBuilder V2 sends no result total on this
+          // endpoint (verified live), so a smaller default risks silently
+          // truncating the tag universe before any per-tag paging even starts.
+          .default(100)
+          .describe("Results per page (defaults to the max — this endpoint reports no total, so a full page is the only warning that more tags exist)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -82,19 +102,50 @@ export function registerTagTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "add_tags_to_person",
-    "Add one or more tags to a person in NationBuilder. Creates tags if they don't already exist.",
     {
-      person_id: z.string().describe("The NationBuilder signup ID"),
-      tags: z
-        .array(z.string())
-        .min(1)
-        .describe("Tag names to add"),
+      title: "Add Tags to Person",
+      description:
+        "Add one or more tags to one or more people in NationBuilder. Creates tags if they don't already exist. Batch-capable — pass multiple comma-separated person_ids to tag a whole roster in one call (max " +
+        MAX_BATCH_PEOPLE +
+        " people per call). Reports success/failure per person, per tag.",
+      inputSchema: {
+        person_ids: z
+          .string()
+          .describe(`Comma-separated NationBuilder signup IDs (e.g. '498900,498903,498967'). Up to ${MAX_BATCH_PEOPLE} people per call.`),
+        tags: z
+          .array(z.string())
+          .min(1)
+          .describe("Tag names to add to every listed person"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
+      const ids = parsePersonIds(params.person_ids);
+
+      if (ids.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "No person IDs provided." }],
+        };
+      }
+      if (ids.length > MAX_BATCH_PEOPLE) {
+        return {
+          isError: true,
+          content: [{
+            type: "text" as const,
+            text: `Too many person_ids (${ids.length}) — up to ${MAX_BATCH_PEOPLE} people per call. Split this into smaller batches.`,
+          }],
+        };
+      }
+
       try {
-        const results: string[] = [];
+        // Resolve every tag name to an ID (or create it) ONCE up front,
+        // rather than once per person — with N people and M tags this cuts
+        // tag-resolution requests from N×M to M, since the same tag lookup
+        // would otherwise repeat identically for every person in the batch.
+        const tagIdByName = new Map<string, string>();
+        const tagResolutionErrors = new Map<string, string>();
 
         for (const tagName of params.tags) {
           try {
@@ -105,41 +156,61 @@ export function registerTagTools(
             // vs. "CMTE_Legislative").
             const resolved = await resolveTagByName(client, tagName);
 
-            let tagId: string;
             if (resolved) {
-              tagId = resolved.id;
+              tagIdByName.set(tagName, resolved.id);
             } else {
-              // Create the tag first
               const newTag = await client.create<TagAttributes>("signup_tags", {
                 data: {
                   type: "signup_tags",
                   attributes: { name: tagName },
                 },
               });
-              tagId = newTag.data.id;
+              tagIdByName.set(tagName, newTag.data.id);
+            }
+          } catch (err) {
+            tagResolutionErrors.set(tagName, err instanceof Error ? err.message : String(err));
+          }
+        }
+
+        let output = "Tag updates:\n\n";
+        for (const personId of ids) {
+          const personResults: string[] = [];
+
+          for (const tagName of params.tags) {
+            const tagId = tagIdByName.get(tagName);
+            if (tagId === undefined) {
+              personResults.push(`x Failed to add "${tagName}": ${tagResolutionErrors.get(tagName) ?? "tag resolution failed"}`);
+              continue;
             }
 
-            await client.create<TaggingAttributes>("signup_taggings", {
-              data: {
-                type: "signup_taggings",
-                attributes: {},
-                relationships: {
-                  signup: { data: { id: params.person_id, type: "signups" } },
-                  tag: { data: { id: tagId, type: "signup_tags" } },
+            try {
+              await client.create<TaggingAttributes>("signup_taggings", {
+                data: {
+                  type: "signup_taggings",
+                  attributes: {},
+                  relationships: {
+                    signup: { data: { id: personId, type: "signups" } },
+                    tag: { data: { id: tagId, type: "signup_tags" } },
+                  },
                 },
-              },
-            });
-            results.push(`+ Added: ${tagName}`);
-          } catch (err) {
-            results.push(`x Failed to add "${tagName}": ${err instanceof Error ? err.message : String(err)}`);
+              });
+              personResults.push(`+ Added: ${tagName}`);
+            } catch (err) {
+              personResults.push(`x Failed to add "${tagName}": ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+
+          output += `Person ${personId}:\n`;
+          for (const line of personResults) {
+            output += `  ${line}\n`;
           }
         }
 
         return {
-          content: [{ type: "text" as const, text: sanitizeText(`Tag updates for person ${params.person_id}:\n\n${results.join("\n")}`) }],
+          content: [{ type: "text" as const, text: sanitizeText(output) }],
         };
       } catch (error) {
-        reportError({ category: "tool_error", message: "add_tags_to_person failed", rawError: error, context: { person_id: params.person_id } });
+        reportError({ category: "tool_error", message: "add_tags_to_person failed", rawError: error, context: { person_id_count: ids.length } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error adding tags: ${error instanceof Error ? error.message : String(error)}` }],
@@ -148,49 +219,84 @@ export function registerTagTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "remove_tags_from_person",
-    "Remove one or more tags from a person in NationBuilder.",
     {
-      person_id: z.string().describe("The NationBuilder signup ID"),
-      tags: z
-        .array(z.string())
-        .min(1)
-        .describe("Tag names to remove"),
+      title: "Remove Tags from Person",
+      description:
+        "Remove one or more tags from one or more people in NationBuilder. Batch-capable — pass multiple comma-separated person_ids to untag a whole roster in one call (max " +
+        MAX_BATCH_PEOPLE +
+        " people per call). Reports success/failure per person, per tag.",
+      inputSchema: {
+        person_ids: z
+          .string()
+          .describe(`Comma-separated NationBuilder signup IDs (e.g. '498900,498903,498967'). Up to ${MAX_BATCH_PEOPLE} people per call.`),
+        tags: z
+          .array(z.string())
+          .min(1)
+          .describe("Tag names to remove from every listed person"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async (params) => {
+      const ids = parsePersonIds(params.person_ids);
+
+      if (ids.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "No person IDs provided." }],
+        };
+      }
+      if (ids.length > MAX_BATCH_PEOPLE) {
+        return {
+          isError: true,
+          content: [{
+            type: "text" as const,
+            text: `Too many person_ids (${ids.length}) — up to ${MAX_BATCH_PEOPLE} people per call. Split this into smaller batches.`,
+          }],
+        };
+      }
+
       try {
         // Shared with get_person_tags: pages to exhaustion (capped) rather
         // than the single 100-row page this used to fetch, and matches tag
         // names case-insensitively — NB tag names carry mixed casing
         // (CMTE_Legislative, WG_Seismicity), and an exact-match lookup here
         // silently failed to remove a tag whose case didn't match verbatim.
-        const { bySignupId, truncated } = await getTaggingsForSignupIds(client, [params.person_id]);
-        const taggings = bySignupId.get(params.person_id) ?? [];
+        // One batched lookup call covers every person in the roster.
+        const { bySignupId, truncated } = await getTaggingsForSignupIds(client, ids);
 
-        const results: string[] = [];
+        let output = "Tag updates:\n\n";
+        for (const personId of ids) {
+          const taggings = bySignupId.get(personId) ?? [];
+          const personResults: string[] = [];
 
-        for (const tagName of params.tags) {
-          const lower = tagName.toLowerCase();
-          const tagging = taggings.find((t) => t.tagName.toLowerCase() === lower);
+          for (const tagName of params.tags) {
+            const lower = tagName.toLowerCase();
+            const tagging = taggings.find((t) => t.tagName.toLowerCase() === lower);
 
-          if (tagging) {
-            try {
-              await client.delete("signup_taggings", tagging.taggingId);
-              results.push(`- Removed: ${tagName}`);
-            } catch (err) {
-              results.push(`x Failed to remove "${tagName}": ${err instanceof Error ? err.message : String(err)}`);
+            if (tagging) {
+              try {
+                await client.delete("signup_taggings", tagging.taggingId);
+                personResults.push(`- Removed: ${tagName}`);
+              } catch (err) {
+                personResults.push(`x Failed to remove "${tagName}": ${err instanceof Error ? err.message : String(err)}`);
+              }
+            } else {
+              personResults.push(`~ Tag "${tagName}" not found on this person${truncated ? " (tag list was truncated — this person has an unusually large number of tags; the tag may exist beyond the cap)" : ""}`);
             }
-          } else {
-            results.push(`~ Tag "${tagName}" not found on this person${truncated ? " (tag list was truncated — this person has an unusually large number of tags; the tag may exist beyond the cap)" : ""}`);
+          }
+
+          output += `Person ${personId}:\n`;
+          for (const line of personResults) {
+            output += `  ${line}\n`;
           }
         }
 
         return {
-          content: [{ type: "text" as const, text: sanitizeText(`Tag updates for person ${params.person_id}:\n\n${results.join("\n")}`) }],
+          content: [{ type: "text" as const, text: sanitizeText(output) }],
         };
       } catch (error) {
-        reportError({ category: "tool_error", message: "remove_tags_from_person failed", rawError: error, context: { person_id: params.person_id } });
+        reportError({ category: "tool_error", message: "remove_tags_from_person failed", rawError: error, context: { person_id_count: ids.length } });
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Error removing tags: ${error instanceof Error ? error.message : String(error)}` }],
@@ -199,19 +305,20 @@ export function registerTagTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_person_tags",
-    "Get every tag on one or more people in NationBuilder. This is the reverse of list_people_with_tag: given person IDs, returns each person's tags. Batch-capable — pass multiple comma-separated IDs to check a whole roster in one call. People with zero tags are explicitly reported as having none — they are never silently omitted.",
     {
-      person_ids: z
-        .string()
-        .describe("Comma-separated NationBuilder signup IDs (e.g. '498900,498903,498967')"),
+      title: "Get Person Tags",
+      description: "Get every tag on one or more people in NationBuilder. This is the reverse of list_people_with_tag: given person IDs, returns each person's tags. Batch-capable — pass multiple comma-separated IDs to check a whole roster in one call. People with zero tags are explicitly reported as having none — they are never silently omitted.",
+      inputSchema: {
+        person_ids: z
+          .string()
+          .describe("Comma-separated NationBuilder signup IDs (e.g. '498900,498903,498967')"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
-      const ids = params.person_ids
-        .split(",")
-        .map((id) => id.trim())
-        .filter(Boolean);
+      const ids = parsePersonIds(params.person_ids);
 
       if (ids.length === 0) {
         return {
@@ -275,29 +382,33 @@ export function registerTagTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "list_people_with_tag",
-    "List people who have a specific tag in NationBuilder. Tag-name lookup is case-insensitive (e.g. 'cmte_legislative' matches 'CMTE_Legislative'). NationBuilder does not report a total count on this endpoint, so by default the response tells you only whether more pages exist — pass count_all: true to walk every page and get an exact count when you need a reliable denominator (e.g. answering \"how many people have this tag\").",
     {
-      tag: z.string().describe("The tag name to search for (case-insensitive)"),
-      count_all: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("Walk every page of this tag first to compute an exact total before returning results. Costs one request per ~100 people on the tag. Use when the count itself is the answer, not just this page's contents."),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List People with Tag",
+      description: "List people who have a specific tag in NationBuilder. Tag-name lookup is case-insensitive (e.g. 'cmte_legislative' matches 'CMTE_Legislative'). NationBuilder does not report a total count on this endpoint, so by default the response tells you only whether more pages exist — pass count_all: true to walk every page and get an exact count when you need a reliable denominator (e.g. answering \"how many people have this tag\").",
+      inputSchema: {
+        tag: z.string().describe("The tag name to search for (case-insensitive)"),
+        count_all: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Walk every page of this tag first to compute an exact total before returning results. Costs one request per ~100 people on the tag. Use when the count itself is the answer, not just this page's contents."),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

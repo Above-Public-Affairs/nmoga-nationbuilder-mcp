@@ -18,10 +18,12 @@ export function registerSignupTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "search_people",
-    "Search for people/supporters in NationBuilder by name, email, or other filters. Returns matching contacts with their key details. Does not support filtering by address (state/city) or by whether email/phone is present — NationBuilder's V2 filter API has no operator for presence checks, and registered address is not a filterable attribute at all (confirmed against the nation's own OpenAPI spec); those parameters previously 400'd or failed outright and have been removed rather than shipped broken.",
     {
+      title: "Search People",
+      description: "Search for people/supporters in NationBuilder by name, email, or other filters. Returns matching contacts with their key details. Does not support filtering by address (state/city) or by whether email/phone is present — NationBuilder's V2 filter API has no operator for presence checks, and registered address is not a filterable attribute at all (confirmed against the nation's own OpenAPI spec); those parameters previously 400'd or failed outright and have been removed rather than shipped broken.",
+      inputSchema: {
       query: z
         .string()
         .optional()
@@ -89,6 +91,8 @@ export function registerSignupTools(
         .min(1)
         .default(1)
         .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -219,11 +223,15 @@ export function registerSignupTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_person",
-    "Get details for a specific person by their NationBuilder ID: contact info, address, support level, and custom values. Does NOT include tags — tags are a separate relationship not carried on the signup record; use get_person_tags for those. Does not include donations, memberships, events, or path progress either — use the dedicated list_* tools for those.",
     {
-      person_id: z.string().describe("The NationBuilder signup ID"),
+      title: "Get Person",
+      description: "Get details for a specific person by their NationBuilder ID: contact info, address, support level, and custom values. Does NOT include tags — tags are a separate relationship not carried on the signup record; use get_person_tags for those. Does not include donations, memberships, events, or path progress either — use the dedicated list_* tools for those.",
+      inputSchema: {
+        person_id: z.string().describe("The NationBuilder signup ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -259,10 +267,12 @@ export function registerSignupTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "create_person",
-    "Create a new person/supporter in NationBuilder with their contact details.",
     {
+      title: "Create Person",
+      description: "Create a new person/supporter in NationBuilder with their contact details.",
+      inputSchema: {
       first_name: z.string().describe("First name"),
       last_name: z.string().describe("Last name"),
       email: z.string().optional().describe("Email address"),
@@ -281,6 +291,8 @@ export function registerSignupTools(
       registered_address_state: z.string().optional().describe("State abbreviation"),
       registered_address_zip: z.string().optional().describe("ZIP code"),
       note: z.string().optional().describe("Internal note about this person"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
       try {
@@ -337,10 +349,12 @@ export function registerSignupTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "update_person",
-    "Update an existing person's details in NationBuilder. Only provided fields will be changed.",
     {
+      title: "Update Person",
+      description: "Update an existing person's details in NationBuilder. Only provided fields will be changed.",
+      inputSchema: {
       person_id: z.string().describe("The NationBuilder signup ID to update"),
       first_name: z.string().optional().describe("First name"),
       last_name: z.string().optional().describe("Last name"),
@@ -357,6 +371,8 @@ export function registerSignupTools(
       employer: z.string().optional().describe("Employer name"),
       occupation: z.string().optional().describe("Occupation"),
       note: z.string().optional().describe("Internal note"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
       try {
@@ -401,10 +417,12 @@ export function registerSignupTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "advanced_search",
-    "Power-user search with full NationBuilder V2 filter syntax. Pass filters as key-value pairs where values can be strings (exact match) or objects with operators (match, gte, lte, gt, lt, not_eq, prefix, suffix). Example: filters={\"support_level\":{\"gte\":\"1\",\"lte\":\"3\"}, \"note\":{\"match\":\"volunteer\"}}. Use the top-level `tag` parameter for tag filtering — the V2 signups endpoint has no tag attribute, so passing `tags` / `tag_list` / etc. inside `filters` will either error or be silently ignored. To filter people vs organizations use `signup_type` (0 = person, 1 = organization); there is no `is_organization` attribute.",
     {
+      title: "Advanced Search",
+      description: "Power-user search with full NationBuilder V2 filter syntax. Pass filters as key-value pairs where values can be strings (exact match) or objects with operators (match, gte, lte, gt, lt, not_eq, prefix, suffix). Example: filters={\"support_level\":{\"gte\":\"1\",\"lte\":\"3\"}, \"note\":{\"match\":\"volunteer\"}}. Use the top-level `tag` parameter for tag filtering — the V2 signups endpoint has no tag attribute, so passing `tags` / `tag_list` / etc. inside `filters` will either error or be silently ignored. To filter people vs organizations use `signup_type` (0 = person, 1 = organization); there is no `is_organization` attribute.",
+      inputSchema: {
       filters: z
         .record(z.string(), z.union([z.string(), z.record(z.string(), z.string())]))
         .optional()
@@ -440,6 +458,8 @@ export function registerSignupTools(
         .min(1)
         .default(1)
         .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

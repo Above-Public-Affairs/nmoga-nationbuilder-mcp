@@ -28,6 +28,18 @@ A code review the same day found `/mcp` and `/sse` were completely unauthenticat
 ### Migration note
 **Deploying this requires updating the claude.ai org Connector URL at the same time**, from the bare `/mcp` to `/mcp/<MCP_URL_SECRET>`, or the connector goes dark the moment this ships (bare `/mcp` now demands a Bearer header the connector can't send). See PROJECT-STATUS.md.
 
+## [2026-08-12] — tool annotations, connector icon, connection-status tool, batch tagging
+
+Four features from the same day's codebase review, landed together.
+
+### Added
+- **`connection_status`** (`src/tools/status.ts`) — a read-only tool that reports the server's own NationBuilder auth state from inside a chat: active auth method (oauth/static_token/none), OAuth token expiry, whether a refresh token is present, and whether the token store is writable. Previously this was only visible via the `/oauth/status` HTTP route (now gated — see the auth-fix entry above). Backed by a new `getAuthStatus()` export in `src/oauth.ts`, which that route now calls too instead of duplicating the logic inline.
+- **Connector icon** — `/favicon.ico` (served from `src/favicon.ts`, a teal "N" monogram, multi-resolution 16/32/48) plus a matching `serverInfo.icons` entry on the `McpServer` constructor in `src/index.ts`. Per the house rule on `*.up.railway.app` connector icons: this is groundwork only — Claude's connector list still derives the icon from the server's domain today and won't visibly change until either Claude honors `serverInfo.icons`/favicon fallback, or this server moves to a custom domain.
+- **Batch tagging** — `add_tags_to_person` and `remove_tags_from_person` (`src/tools/tags.ts`) now accept comma-separated `person_ids` (matching `get_person_tags`'s existing convention) instead of a single `person_id`, with per-person/per-tag success-or-failure reporting and a 50-person cap per call. `add_tags_to_person` resolves each tag name to an ID once per call rather than once per person, cutting a full-roster call from up to 3×N×M NationBuilder requests to roughly 1.5×M + N×M.
+
+### Changed
+- All 48 tools across `src/tools/` (17 existing files, plus the new `status.ts`) migrated from the deprecated `server.tool()` to `server.registerTool()` with explicit `title` and `annotations` (`readOnlyHint`/`destructiveHint`) on every tool — 38 read-only, 8 non-destructive writes, 2 destructive (`remove_person_from_list`, `remove_tags_from_person`). Handler logic and Zod schemas unchanged except for the `tags.ts` batch-tagging rewrite above.
+
 ## [2026-08-12] — two remaining silent-truncation gaps
 
 Follow-up to the two entries below (same date, same root incident). A cross-check of the shipped fixes against the original defect list found two cases still open — both the same failure mode the rest of the work closed: a tool reporting a confident answer that the query never actually supported.

@@ -4,7 +4,7 @@ MCP server that connects Claude to NMOGA's NationBuilder nation. Manage people, 
 
 ## Available Tools
 
-47 tools across 15 resource areas. This table is kept in sync with `src/tools/*.ts` — if you add or remove a tool, update it here too, so a future session doesn't have to rediscover the drift the hard way.
+48 tools across 16 resource areas. This table is kept in sync with `src/tools/*.ts` — if you add or remove a tool, update it here too, so a future session doesn't have to rediscover the drift the hard way.
 
 | Tool | Description |
 |------|-------------|
@@ -16,8 +16,8 @@ MCP server that connects Claude to NMOGA's NationBuilder nation. Manage people, 
 | `update_person` | Update a person's details |
 | **Tags** | |
 | `list_tags` | List all tags with optional name search |
-| `add_tags_to_person` | Add tags to a person (creates tags that don't exist) |
-| `remove_tags_from_person` | Remove tags from a person (case-insensitive) |
+| `add_tags_to_person` | Add tags to one or more people (comma-separated `person_ids`, up to 50), creating tags that don't exist |
+| `remove_tags_from_person` | Remove tags from one or more people (comma-separated `person_ids`, up to 50; case-insensitive) |
 | `list_people_with_tag` | List people with a specific tag (case-insensitive; `count_all` for an exact total) |
 | `get_person_tags` | Get every tag on one or more people — the reverse of `list_people_with_tag`, batch-capable |
 | **Contacts** | |
@@ -70,6 +70,8 @@ MCP server that connects Claude to NMOGA's NationBuilder nation. Manage people, 
 | **Signup Profiles** | |
 | `get_signup_profile` | Get a person's profile (bio, headline, social links) |
 | `update_signup_profile` | Update a person's profile (overwrites — see the tool's warning) |
+| **Status** | |
+| `connection_status` | Check the server's own NationBuilder auth state (active method, token expiry, refresh token, token store) from inside a chat — no HTTP access required |
 
 ## Setup
 
@@ -148,7 +150,9 @@ logs, and the `/oauth/callback` success page says so explicitly.
 
 Check current auth state any time at `/oauth/<secret>/status` (see `MCP_URL_SECRET`
 above; `/oauth/authorize`/`/oauth/status` require the same credential — see
-"Environment Variables" above).
+"Environment Variables" above), or from inside a chat via the `connection_status` tool
+(which needs no HTTP credential — it goes through the same session auth as any other
+tool call).
 
 ## Development
 

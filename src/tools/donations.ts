@@ -14,31 +14,35 @@ export function registerDonationTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_donations",
-    "List donations in NationBuilder with optional filtering by date or amount.",
     {
-      since: z
-        .string()
-        .optional()
-        .describe("Donations after this date (YYYY-MM-DD)"),
-      until: z
-        .string()
-        .optional()
-        .describe("Donations before this date (YYYY-MM-DD)"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Donations",
+      description: "List donations in NationBuilder with optional filtering by date or amount.",
+      inputSchema: {
+        since: z
+          .string()
+          .optional()
+          .describe("Donations after this date (YYYY-MM-DD)"),
+        until: z
+          .string()
+          .optional()
+          .describe("Donations before this date (YYYY-MM-DD)"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

@@ -14,24 +14,28 @@ export function registerContactTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_contacts",
-    "List interaction history (calls, emails, meetings, etc.) for a person in NationBuilder.",
     {
-      person_id: z.string().describe("The NationBuilder signup ID"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Contacts",
+      description: "List interaction history (calls, emails, meetings, etc.) for a person in NationBuilder.",
+      inputSchema: {
+        person_id: z.string().describe("The NationBuilder signup ID"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
