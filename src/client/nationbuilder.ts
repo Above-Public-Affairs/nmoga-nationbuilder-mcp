@@ -31,6 +31,13 @@ export function createNationBuilderClient(
   const baseUrl = `https://${slug}.nationbuilder.com/api/v2`;
   const rateLimiter = new RateLimiter();
   const retryLimit = 3;
+  // Per-attempt fetch timeout. A generic (non-5xx) failure — which is what a
+  // timeout becomes — retries with no added sleep (only the 5xx branch below
+  // sleeps), so worst case across all 3 attempts is ~3x this value, plus up
+  // to ~15s more if a 5xx backoff also occurs. Well above NationBuilder's
+  // typical sub-2s response time, but bounded enough that a hung connection
+  // can't hang a tool call indefinitely.
+  const REQUEST_TIMEOUT_MS = 15000;
 
   function getToken(): string {
     return typeof accessToken === "function" ? accessToken() : accessToken;
@@ -107,6 +114,19 @@ export function createNationBuilderClient(
     }
   }
 
+  /**
+   * Retry-After per RFC 7231: either delta-seconds or an HTTP-date. Returns
+   * undefined on anything else so callers fall back to their own backoff.
+   */
+  function parseRetryAfterMs(value: string | null): number | undefined {
+    if (!value) return undefined;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const dateMs = Date.parse(value);
+    if (!Number.isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
+    return undefined;
+  }
+
   function formatApiErrors(errorResponse: JsonApiErrorResponse): string {
     return errorResponse.errors
       .map((e) => {
@@ -142,6 +162,7 @@ export function createNationBuilderClient(
         const fetchOptions: RequestInit = {
           method,
           headers: buildHeaders(),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         };
 
         if (body) {
@@ -187,7 +208,7 @@ export function createNationBuilderClient(
         // Handle rate limiting
         if (response.status === 429) {
           lastStatus = 429;
-          await rateLimiter.handleError(429);
+          await rateLimiter.handleError(429, parseRetryAfterMs(response.headers.get("retry-after")));
           continue;
         }
 

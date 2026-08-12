@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026-08-12] — Five code-quality fixes (tag dedup, refresh race, timeout, shared rate limit)
+
+A same-day review found five issues, none yet user-visible incidents but each a live risk. All five fixed together; verified against `main` after it picked up the HTTP-auth security fix above (this branch had diverged before that landed).
+
+### Fixed
+- **`add_tags_to_person` could create near-duplicate tags.** It looked up an existing tag with an exact-case filter and created a new one on any miss — including a miss caused purely by casing (`cmte_legislative` vs. an existing `CMTE_Legislative`). Now resolves via the same case-insensitive `resolveTagByName` helper `list_people_with_tag` and `remove_tags_from_person` already use.
+- **Concurrent OAuth token refreshes could race.** NationBuilder rotates the refresh token on every refresh; two simultaneous 401s (from two concurrent tool calls) each calling `forceRefreshToken()` independently meant whichever finished second sent an already-rotated token and got rejected — risking the "dead connector, must re-authorize" failure mode the volume-persistence work exists to prevent. `src/oauth.ts` now single-flights refreshes: concurrent callers await the same in-flight refresh instead of starting their own. Verified: two concurrent `forceRefreshToken()` calls now produce exactly one network call.
+- **No timeout on outbound NationBuilder requests.** A hung connection could hang a tool call indefinitely. Added a 15s per-attempt `AbortSignal.timeout`, sized to interact sensibly with the existing 3-attempt retry + backoff.
+- **The rate limiter was per-session, not global.** `createNationBuilderClient` (and its `RateLimiter`) was built fresh on every new Streamable HTTP/SSE session, so N concurrent connector sessions each believed they had the full 200-req/10s budget against NationBuilder's real 250-req/10s-per-IP limit. Now built once per process and shared across all sessions. 429 responses also now honor NationBuilder's `Retry-After` header (capped at the existing 30s backoff ceiling) instead of always using the fallback doubling backoff.
+- **Stale `.env.example`.** Removed the `RAILWAY_API_TOKEN` block, which described the abandoned Railway-env-var token persistence mechanism replaced by the volume-based `persistTokens()` (see the entry below).
+
 ## [2026-08-12] — HTTP endpoints authenticated (URGENT security fix)
 
 A code review the same day found `/mcp` and `/sse` were completely unauthenticated in production: anyone with the URL got all 47 tools running with the org's OAuth token — full member PII (names, emails, phones, addresses, donations, support levels) plus write tools (`update_person`, `remove_tags_from_person`, list removals). `MCP_AUTH_TOKEN` was already set in Railway env but nothing in `src/` read it. `/oauth/authorize` and `/oauth/status` were equally open: any visitor could view token expiry/store-path/writability, or initiate an OAuth flow that — completed with any NationBuilder login on the nation — replaces the server's working token.

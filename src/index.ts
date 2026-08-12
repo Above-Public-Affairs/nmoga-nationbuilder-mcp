@@ -19,7 +19,7 @@ import { randomUUID } from "crypto";
 import type { Server } from "node:http";
 import express from "express";
 import type { Request, Response } from "express";
-import { createNationBuilderClient } from "./client/nationbuilder.js";
+import { createNationBuilderClient, type NationBuilderClient } from "./client/nationbuilder.js";
 import { bootstrapToken, createOAuthRouter, getOAuthToken, getTokenStoreStatus, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
 import { reportError, reportErrorThrottled, reportAndFlush, safeErr } from "./utils/errorReporter.js";
 import { getMcpUrlSecret, isAuthorized } from "./utils/httpAuth.js";
@@ -129,10 +129,7 @@ function validateEnv(): { slug: string; staticToken: string | null } {
   return { slug, staticToken };
 }
 
-function createServer(
-  slug: string,
-  tokenGetter: string | (() => string)
-): McpServer {
+function createServer(client: NationBuilderClient): McpServer {
   const server = new McpServer(
     {
       name: "nmoga-nationbuilder-mcp",
@@ -142,8 +139,6 @@ function createServer(
       instructions: INSTRUCTIONS,
     }
   );
-
-  const client = createNationBuilderClient(slug, tokenGetter);
 
   // Register all tools
   registerSignupTools(server, client);
@@ -208,6 +203,12 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
       "value; a short one is guessable and defeats the point of a secret path."
     );
   }
+
+  // One client (and therefore one RateLimiter) shared by every session in
+  // this process — NationBuilder's 250-req/10s limit is per IP, not per
+  // session, so building a fresh client per connection let concurrent
+  // sessions each believe they had the full budget.
+  const client = createNationBuilderClient(slug, getToken);
 
   // Track active transports by session ID (Streamable HTTP)
   const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
@@ -331,7 +332,7 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
           }
         };
 
-        const server = createServer(slug, getToken);
+        const server = createServer(client);
         await server.connect(transport);
 
         // handleRequest processes the initialize and sets the session ID
@@ -414,7 +415,7 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     });
 
     try {
-      const server = createServer(slug, getToken);
+      const server = createServer(client);
       await server.connect(transport);
     } catch (err) {
       // server.connect() writes the SSE response head as part of
@@ -572,7 +573,8 @@ async function startStdioServer(slug: string, staticToken: string | null): Promi
     // Thrown, not exited directly — see the matching comment in validateEnv().
     throw new Error("NATIONBUILDER_ACCESS_TOKEN is required for stdio mode (OAuth is HTTP-only)");
   }
-  const server = createServer(slug, staticToken);
+  const client = createNationBuilderClient(slug, staticToken);
+  const server = createServer(client);
   const transport = new StdioServerTransport();
 
   console.error("Starting NMOGA NationBuilder MCP server (stdio)...");

@@ -1,5 +1,26 @@
 # Session Handoff
 
+## Update (2026-08-12, latest session) — five code-quality fixes, merged on top of the auth fix
+
+A separate same-day review (independent of the "HTTP endpoints authenticated" work below)
+found and fixed five issues: `add_tags_to_person` could create near-duplicate tags on a
+casing mismatch; concurrent 401s could race two OAuth token refreshes against
+NationBuilder's refresh-token rotation; outbound NationBuilder requests had no timeout;
+the rate limiter was built fresh per HTTP session instead of shared across the whole
+process (so concurrent connector sessions each thought they had the full request budget);
+and `.env.example` still described the abandoned `RAILWAY_API_TOKEN` mechanism. Full detail
+in `CHANGELOG.md`'s `[2026-08-12] — Five code-quality fixes` entry.
+
+**Branch history note:** this work started on this branch before the "HTTP endpoints
+authenticated" fix below landed on `main` from a concurrent session. Reconciled via
+`git stash` + fast-forward + `git stash pop`, with two real conflicts (`.env.example`,
+`src/index.ts` — both files the auth fix also touched) resolved by hand; `src/oauth.ts`
+merged clean since the two fixes touch disjoint functions. Rebuilt and re-verified
+(`npm run build`, plus the single-flight-refresh and shared-rate-limiter checks) against
+the merged result before pushing — the auth fix's `/mcp`/`/sse` restructuring (secret-path
+routes, `handleMcpRequest`/`handleSseConnect`) is what the shared-client hoist now plugs
+into. This confirms both fixes coexist correctly; it does not add new coverage beyond that.
+
 ## Update (2026-08-12, later session) — HTTP endpoints authenticated, not yet deployed
 
 A same-day code review found `/mcp`, `/sse`, `/oauth/authorize`, and `/oauth/status` were

@@ -98,15 +98,16 @@ export function registerTagTools(
 
         for (const tagName of params.tags) {
           try {
-            // Look up tag by name to get its numeric ID
-            const tagSearch = await client.get<TagAttributes>("signup_tags", {
-              filter: { name: tagName },
-              page_size: 1,
-            });
+            // Case-insensitive resolve (shared with list_people_with_tag /
+            // remove_tags_from_person) — an exact-case-only lookup here used
+            // to create a near-duplicate tag whenever the caller's casing
+            // didn't match an existing tag verbatim (e.g. "cmte_legislative"
+            // vs. "CMTE_Legislative").
+            const resolved = await resolveTagByName(client, tagName);
 
             let tagId: string;
-            if (tagSearch.data.length > 0) {
-              tagId = tagSearch.data[0].id;
+            if (resolved) {
+              tagId = resolved.id;
             } else {
               // Create the tag first
               const newTag = await client.create<TagAttributes>("signup_tags", {

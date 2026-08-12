@@ -35,12 +35,17 @@ export class RateLimiter {
     this.backoffMs = 1000;
   }
 
-  async handleError(statusCode?: number): Promise<void> {
+  /**
+   * @param retryAfterMs Parsed `Retry-After` from the response, if
+   *   NationBuilder sent one. Preferred over our own doubling backoff when
+   *   present, but still capped at `maxBackoffMs` so a single tool call can't
+   *   be told to wait an extreme amount of time.
+   */
+  async handleError(statusCode?: number, retryAfterMs?: number): Promise<void> {
     if (statusCode === 429) {
-      console.error(
-        `Rate limited (429). Backing off ${this.backoffMs}ms...`
-      );
-      await this.sleep(this.backoffMs);
+      const waitMs = Math.min(retryAfterMs ?? this.backoffMs, this.maxBackoffMs);
+      console.error(`Rate limited (429). Backing off ${waitMs}ms...`);
+      await this.sleep(waitMs);
       this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
     }
   }

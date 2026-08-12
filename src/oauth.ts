@@ -255,7 +255,7 @@ export async function bootstrapToken(): Promise<void> {
     return;
   }
 
-  const ok = await doRefresh();
+  const ok = await refreshSingleFlight();
   if (!ok) {
     console.error(
       "CRITICAL: startup token refresh failed. The stored refresh token is " +
@@ -305,6 +305,27 @@ function reportRefreshFailure(message: string, context: Record<string, unknown>,
     throttleMs: REFRESH_THROTTLE_MS,
     force: transition,
   });
+}
+
+/**
+ * Single-flight guard around doRefresh(). NationBuilder rotates the refresh
+ * token on every refresh, so two concurrent callers (e.g. two simultaneous
+ * 401s from two concurrent tool calls) each running their own doRefresh()
+ * would race: whichever lands second sends an already-rotated refresh token
+ * and gets rejected, potentially clobbering tokenData with a failed/partial
+ * state — reintroducing the "dead connector, must re-authorize" failure mode
+ * the volume-persistence work above exists to prevent. Concurrent callers
+ * instead await the same in-flight refresh.
+ */
+let refreshInFlight: Promise<boolean> | null = null;
+
+function refreshSingleFlight(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = doRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
 }
 
 /** Internal refresh logic shared by refreshTokenIfNeeded and forceRefreshToken */
@@ -391,12 +412,12 @@ export async function refreshTokenIfNeeded(): Promise<void> {
   const fiveMinutes = 5 * 60 * 1000;
   if (Date.now() < tokenData.expiresAt - fiveMinutes) return;
 
-  await doRefresh();
+  await refreshSingleFlight();
 }
 
 /** Force a token refresh (e.g. after a 401). Returns true if successful. */
 export async function forceRefreshToken(): Promise<boolean> {
-  return doRefresh();
+  return refreshSingleFlight();
 }
 
 /**
