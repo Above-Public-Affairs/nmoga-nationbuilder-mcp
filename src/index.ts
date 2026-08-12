@@ -21,7 +21,8 @@ import express from "express";
 import type { Request, Response } from "express";
 import { createNationBuilderClient } from "./client/nationbuilder.js";
 import type { NationBuilderClientOptions } from "./client/nationbuilder.js";
-import { bootstrapToken, createOAuthRouter, forceRefreshToken, getOAuthToken, getTokenStoreStatus, initTokenFromEnv, isOAuthConfigured, refreshTokenIfNeeded } from "./oauth.js";
+import { bootstrapToken, createOAuthRouter, forceRefreshToken, getOAuthToken, initTokenFromEnv, isOAuthConfigured, sweepUserTokens } from "./oauth.js";
+import { getStoreStatus } from "./auth/store.js";
 import { reportError, reportErrorThrottled, reportAndFlush, safeErr } from "./utils/errorReporter.js";
 import { getMcpUrlSecret, isAuthorized } from "./utils/httpAuth.js";
 import { registerSignupTools } from "./tools/signups.js";
@@ -518,21 +519,23 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     await handleSseMessage(req, res);
   });
 
-  // Refresh OAuth token periodically (every 30 minutes)
+  // Sweep every connected user's NationBuilder token periodically (every 15
+  // minutes — was 30, halved since this now walks a whole user list
+  // sequentially with a small gap between each, rather than refreshing one
+  // shared token). sweepUserTokens() owns failure reporting per-user — it
+  // knows *why* each refresh failed and holds its own per-user throttle
+  // state. This catch only covers an unexpected throw from the sweep itself.
   setInterval(() => {
-    // doRefresh() (called via refreshTokenIfNeeded) owns failure reporting —
-    // it knows *why* refresh failed and holds its own throttle state. This
-    // catch only covers an unexpected throw from the interval itself.
-    refreshTokenIfNeeded().catch((err) => {
-      console.error("Token refresh interval error:", safeErr(err));
+    sweepUserTokens().catch((err) => {
+      console.error("Token sweep interval error:", safeErr(err));
       reportErrorThrottled({
         category: "auth_error",
-        message: "token_refresh_interval: threw unexpectedly",
+        message: "token_sweep_interval: threw unexpectedly",
         rawError: err,
-        throttleKey: "refresh_interval_threw",
+        throttleKey: "sweep_interval_threw",
       });
     });
-  }, 30 * 60 * 1000);
+  }, 15 * 60 * 1000);
 
   httpServer = app.listen(port, () => {
     console.error(`NMOGA NationBuilder MCP server listening on port ${port}`);
@@ -552,7 +555,7 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
     // shows up as a failed write during authorize — after someone has already
     // re-authorized and is about to lose it on the next restart.
     if (isOAuthConfigured()) {
-      const store = getTokenStoreStatus();
+      const store = getStoreStatus();
       if (store.writable) {
         console.error(`Token store: ${store.path} (writable — tokens will survive restarts)`);
       } else {

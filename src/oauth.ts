@@ -1,39 +1,28 @@
 /**
- * OAuth 2.0 flow for NationBuilder
+ * OAuth 2.0 flow for NationBuilder.
  *
  * Adds /oauth/authorize and /oauth/callback routes.
- * Persists tokens to a JSON file on the Railway volume so they survive restarts,
- * falling back to the NATIONBUILDER_ACCESS_TOKEN / NATIONBUILDER_REFRESH_TOKEN
- * env vars when no token file exists yet (first boot after this change, and
- * local stdio use).
  *
- * NationBuilder rotates the refresh token on every refresh, so whatever we
- * persist is the *only* way back after a restart — if the write fails, the next
- * restart leaves the connector with no NationBuilder access until a human
- * re-runs /oauth/authorize. This previously wrote back to Railway env vars via
- * the platform API, which required a privileged RAILWAY_API_TOKEN inside the
- * container and failed silently for months. A file on a mounted volume needs no
- * credentials and no network call.
+ * As of this commit, refresh/persistence internals are backed by the
+ * per-user store in ./auth/store.ts rather than a single module-global
+ * token. Externally nothing has changed yet — every route and export here
+ * still operates on exactly one identity, `LEGACY_USER_KEY`, so this is a
+ * plumbing swap, not a behavior change. The routes below become genuinely
+ * per-user once the Authorization Server (src/auth/provider.ts) replaces
+ * `/oauth/:secret/authorize` with claude.ai's own OAuth handshake, at which
+ * point `LEGACY_USER_KEY` only ever refers to whatever was migrated from
+ * the pre-per-user token file, if anything was.
  *
  * Security: CSRF state parameter, PKCE (S256), HTML output escaping.
- * The token file holds live credentials, so it's written 0600.
  */
 
 import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
 import { randomBytes, createHash } from "crypto";
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "fs";
-import { dirname, join } from "path";
 import { reportError, reportErrorThrottled, resetThrottle, safeErr } from "./utils/errorReporter.js";
 import { isAuthorized } from "./utils/httpAuth.js";
-
-interface TokenData {
-  accessToken: string;
-  refreshToken: string | null;
-  expiresAt: number | null; // epoch ms, null = never expires (V1 tokens)
-}
-
-let tokenData: TokenData | null = null;
+import * as tokenStore from "./auth/store.js";
+import { LEGACY_USER_KEY } from "./auth/store.js";
 
 // --- PKCE helpers ---
 function generateCodeVerifier(): string {
@@ -79,7 +68,7 @@ function escapeHtml(str: string): string {
  * The bounded `error` code (invalid_grant, invalid_client, ...) is the
  * actual diagnostic and is safe: it's from a small OAuth2-spec vocabulary.
  */
-function oauthErrorCode(body: string): string | null {
+export function oauthErrorCode(body: string): string | null {
   try {
     const parsed = JSON.parse(body) as { error?: unknown };
     return typeof parsed.error === "string" && parsed.error.length <= 64 ? parsed.error : null;
@@ -88,107 +77,7 @@ function oauthErrorCode(body: string): string | null {
   }
 }
 
-/**
- * Where the token file lives. TOKEN_STORE_PATH overrides; otherwise it sits on
- * the Railway volume mount. Nothing outside the volume survives a restart, so a
- * wrong path here silently reintroduces the exact bug this replaced.
- */
-function getTokenStorePath(): string {
-  if (process.env.TOKEN_STORE_PATH) return process.env.TOKEN_STORE_PATH;
-  const mount = process.env.RAILWAY_VOLUME_MOUNT_PATH;
-  return mount ? join(mount, "nb-tokens.json") : "";
-}
-
-/** Persist tokens to the volume. Returns true only if the bytes actually landed. */
-function persistTokens(data: TokenData): boolean {
-  const path = getTokenStorePath();
-
-  if (!path) {
-    console.error(
-      "CRITICAL: no token store path (RAILWAY_VOLUME_MOUNT_PATH unset and no " +
-      "TOKEN_STORE_PATH). Tokens are in memory only — the next restart will " +
-      "leave this connector with no NationBuilder access until someone re-runs " +
-      "/oauth/authorize. Mount a volume on this service."
-    );
-    reportError({
-      category: "auth_error",
-      message: "NationBuilder token persistence unavailable — no volume mounted",
-    });
-    return false;
-  }
-
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    // Write-then-rename so a crash mid-write can't leave a truncated file that
-    // reads back as corrupt on the next boot.
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-    renameSync(tmp, path);
-    console.error(`OAuth tokens persisted to ${path}`);
-    return true;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    console.error(
-      `CRITICAL: could not write tokens to ${path} (${detail}). This service ` +
-      `will lose NationBuilder access on its next restart until someone ` +
-      `re-runs /oauth/authorize.`
-    );
-    reportError({
-      category: "auth_error",
-      message: `NationBuilder token persistence failed: ${detail}`,
-      context: { path },
-    });
-    return false;
-  }
-}
-
-/**
- * Report where tokens will be written and whether that location actually works,
- * by probing it rather than assuming. Exposed on /oauth/status and logged at
- * boot so a missing volume is visible immediately — otherwise the only signal
- * is a failed write during authorize, which is far too late: by then someone
- * has already re-authorized and will silently lose it on the next restart.
- */
-export function getTokenStoreStatus(): { path: string | null; writable: boolean; reason?: string } {
-  const path = getTokenStorePath();
-  if (!path) {
-    return { path: null, writable: false, reason: "no RAILWAY_VOLUME_MOUNT_PATH or TOKEN_STORE_PATH — is a volume mounted?" };
-  }
-
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    const probe = `${path}.probe`;
-    writeFileSync(probe, "", { mode: 0o600 });
-    unlinkSync(probe);
-    return { path, writable: true };
-  } catch (err) {
-    return { path, writable: false, reason: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-/** Read persisted tokens from the volume, or null if absent/unreadable. */
-function loadPersistedTokens(): TokenData | null {
-  const path = getTokenStorePath();
-  if (!path) return null;
-
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<TokenData>;
-    if (!parsed.accessToken) return null;
-    return {
-      accessToken: parsed.accessToken,
-      refreshToken: parsed.refreshToken ?? null,
-      expiresAt: parsed.expiresAt ?? null,
-    };
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (code !== "ENOENT") {
-      console.error(`Could not read token store at ${path}: ${String(err)}`);
-    }
-    return null;
-  }
-}
-
-function getConfig() {
+export function getConfig() {
   const slug = process.env.NATIONBUILDER_SLUG!;
   const clientId = process.env.NATIONBUILDER_CLIENT_ID;
   const clientSecret = process.env.NATIONBUILDER_CLIENT_SECRET;
@@ -201,135 +90,121 @@ function getConfig() {
   return { slug, clientId, clientSecret, callbackUrl };
 }
 
-/**
- * Hydrate in-memory tokenData on startup.
- *
- * The volume is the source of truth; env vars are only a fallback for the first
- * boot after a fresh authorize (and for local stdio use). Preferring the file
- * matters because the env copy is frozen at whatever was last written there —
- * trusting it over a newer file would hand back an already-rotated token.
- */
-export function initTokenFromEnv(): void {
-  if (tokenData) return;
-
-  const persisted = loadPersistedTokens();
-  if (persisted) {
-    tokenData = persisted;
-    console.error(
-      `Loaded tokens from ${getTokenStorePath()} ` +
-      `(refresh token: ${persisted.refreshToken ? "yes" : "no"})`
-    );
-    return;
-  }
-
-  const accessToken = process.env.NATIONBUILDER_ACCESS_TOKEN;
-  const refreshToken = process.env.NATIONBUILDER_REFRESH_TOKEN;
-
-  if (accessToken) {
-    tokenData = {
-      accessToken,
-      refreshToken: refreshToken ?? null,
-      expiresAt: null, // unknown — startup refresh will establish it
-    };
-    console.error(
-      `No token file yet — loaded token from env vars (refresh token: ${refreshToken ? "yes" : "no"})`
-    );
-  }
-}
-
-/**
- * Exercise the stored refresh token once at startup.
- *
- * Hydrating from env leaves expiresAt null, which makes refreshTokenIfNeeded a
- * no-op — so nothing would touch the token until a user's first tool call took
- * a 401. Refreshing here means a restart either re-establishes the rotation
- * chain (and re-persists it) or surfaces a dead refresh token in the deploy
- * logs immediately, instead of as a broken connector for whoever tries first.
- */
-export async function bootstrapToken(): Promise<void> {
-  if (!tokenData?.refreshToken) {
-    console.error(
-      "No refresh token available at startup — running on a static token. " +
-      "If NationBuilder rejects it, re-authorize at /oauth/authorize."
-    );
-    return;
-  }
-
-  const ok = await doRefresh();
-  if (!ok) {
-    console.error(
-      "CRITICAL: startup token refresh failed. The stored refresh token is " +
-      "likely stale or revoked, so NationBuilder tool calls will fail. " +
-      "Re-authorize at /oauth/authorize to restore access."
-    );
-    reportError({
-      category: "auth_error",
-      message: "NationBuilder startup token refresh failed — connector has no usable token",
-    });
-  }
-}
-
 /** Returns true if OAuth env vars are configured */
 export function isOAuthConfigured(): boolean {
   const { clientId, clientSecret, callbackUrl } = getConfig();
   return !!(clientId && clientSecret && callbackUrl);
 }
 
-/** Returns the current OAuth access token, or null if not yet obtained */
-export function getOAuthToken(): string | null {
-  return tokenData?.accessToken ?? null;
+/**
+ * Hydrate the legacy identity from env vars, if nothing was persisted (or
+ * migrated) yet. The store's own load() already handles the "an old
+ * pre-per-user file exists" migration automatically and lazily — this is
+ * only the remaining case: no file at all yet, first boot, env vars as the
+ * seed. Matches the old initTokenFromEnv()'s env-fallback behavior exactly.
+ */
+export function initTokenFromEnv(): void {
+  if (tokenStore.getUser(LEGACY_USER_KEY)) return;
+
+  const accessToken = process.env.NATIONBUILDER_ACCESS_TOKEN;
+  const refreshToken = process.env.NATIONBUILDER_REFRESH_TOKEN;
+  if (!accessToken) return;
+
+  tokenStore.setUserTokens(LEGACY_USER_KEY, {
+    accessToken,
+    refreshToken: refreshToken ?? null,
+    expiresAt: null, // unknown — the startup sweep will establish it
+  });
+  console.error(
+    `No persisted token yet — loaded from env vars (refresh token: ${refreshToken ? "yes" : "no"})`
+  );
 }
 
-/**
- * The client force-refreshes on EVERY 401 — and does so twice per failed
- * request (the retry loop's error-message heuristic doesn't recognize an
- * auth failure as terminal, so it retries once more before giving up). An
- * unthrottled report here means one row per tool call for as long as the
- * refresh token stays revoked. `refreshHealthy` tracks working -> broken so
- * the first failure after a healthy period always gets through immediately,
- * even inside an open throttle window from a stale/earlier outage.
- */
-const REFRESH_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
-const REFRESH_THROTTLE_KEY = "oauth_refresh_failed";
-let refreshHealthy = true;
+/** Returns the current (legacy-identity) OAuth access token, or null. */
+export function getOAuthToken(): string | null {
+  return tokenStore.getUserAccessToken(LEGACY_USER_KEY);
+}
 
-function reportRefreshFailure(message: string, context: Record<string, unknown>, rawError?: unknown): void {
-  const transition = refreshHealthy;
-  refreshHealthy = false;
+// --- Refresh ---------------------------------------------------------------
+
+/**
+ * NationBuilder refresh tokens are single-use — a request that races another
+ * refresh for the same user, or that lands while a refresh is already in
+ * flight, must never send a second concurrent refresh_token grant, since the
+ * first one to land revokes it upstream and the second gets `invalid_grant`
+ * for a token that was actually fine seconds ago. Callers racing each other
+ * now share one promise instead of one calling doRefreshUser() out from
+ * under the other.
+ */
+const refreshInFlight = new Map<string, Promise<boolean>>();
+
+/** Skip a network round-trip for this long after a refresh attempt fails —
+ *  a persistently-broken refresh token won't fix itself on the very next
+ *  tool call a few seconds later, and this bounds how often we hit
+ *  NationBuilder while it's failing. */
+const NEGATIVE_CACHE_MS = 30 * 1000;
+const lastRefreshFailedAt = new Map<string, number>();
+
+const REFRESH_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Report a refresh failure, throttled per-user so one broken connection
+ * doesn't suppress the report for every other connected person sharing this
+ * module's throttle map (the old module-global REFRESH_THROTTLE_KEY did
+ * exactly that). `force` defaults to "this user's healthy -> broken
+ * transition", read from the store *before* the caller flips it, so the
+ * first failure after a healthy period always gets through immediately —
+ * even inside a throttle window left open by an earlier, different user's
+ * outage.
+ */
+function reportRefreshFailure(
+  userKey: string,
+  message: string,
+  context: Record<string, unknown>,
+  opts: { rawError?: unknown; force?: boolean } = {}
+): void {
+  const user = tokenStore.getUser(userKey);
+  const wasHealthy = user?.refreshHealthy ?? true;
+  tokenStore.upsertUser(userKey, { refreshHealthy: false });
+  tokenStore.save();
+
+  const tag = tokenStore.userTag(userKey);
   reportErrorThrottled({
     category: "auth_error",
     message,
-    rawError,
-    context: { ...context, first_failure_since_healthy: transition },
-    throttleKey: REFRESH_THROTTLE_KEY,
+    rawError: opts.rawError,
+    context: { ...context, user_tag: tag, first_failure_since_healthy: wasHealthy },
+    throttleKey: `oauth_refresh_failed:${tag}`,
     throttleMs: REFRESH_THROTTLE_MS,
-    force: transition,
+    force: opts.force ?? wasHealthy,
   });
 }
 
-/** Internal refresh logic shared by refreshTokenIfNeeded and forceRefreshToken */
-async function doRefresh(): Promise<boolean> {
-  if (!tokenData?.refreshToken) return false;
+async function doRefreshUser(userKey: string): Promise<boolean> {
+  const user = tokenStore.getUser(userKey);
+  // Also covers the terminal invalid_grant case below: once markRevoked()
+  // runs, every subsequent call returns here without ever hitting the
+  // network again — which is what makes "report once per user" true
+  // without any extra bookkeeping.
+  if (!user || !user.refreshToken || user.revoked) return false;
 
   const { slug, clientId, clientSecret } = getConfig();
   if (!clientId || !clientSecret) return false;
 
-  console.error("Refreshing OAuth token...");
+  const tag = tokenStore.userTag(userKey);
+  console.error(`Refreshing NationBuilder token for ${tag}...`);
 
   try {
-    const response = await fetch(
-      `https://${slug}.nationbuilder.com/oauth/token`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          grant_type: "refresh_token",
-          refresh_token: tokenData.refreshToken,
-          client_id: clientId,
-          client_secret: clientSecret,
-        }),
-      }
-    );
+    const response = await fetch(`https://${slug}.nationbuilder.com/oauth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: user.refreshToken,
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    });
 
     if (!response.ok) {
       const text = await response.text();
@@ -337,11 +212,27 @@ async function doRefresh(): Promise<boolean> {
       // contains client_secret and refresh_token, and NationBuilder's error
       // response can echo request params back.
       const code = oauthErrorCode(text);
-      console.error(`Token refresh failed: HTTP ${response.status}${code ? ` (${code})` : ""}`);
-      reportRefreshFailure("oauth_refresh: NationBuilder rejected the refresh token", {
-        http_status: response.status,
-        oauth_error: code,
-      });
+      console.error(`Token refresh failed for ${tag}: HTTP ${response.status}${code ? ` (${code})` : ""}`);
+      lastRefreshFailedAt.set(userKey, Date.now());
+
+      if (code === "invalid_grant") {
+        // Terminal: this refresh token is dead, not just temporarily
+        // unreachable. Mark revoked so the guard above stops retrying, and
+        // report once, unthrottled — there is nothing else to say about
+        // this user's connection until they re-authorize.
+        tokenStore.markRevoked(userKey, true);
+        reportRefreshFailure(
+          userKey,
+          "oauth_refresh: NationBuilder rejected the refresh token (invalid_grant) — needs re-authorization",
+          { http_status: response.status, oauth_error: code },
+          { force: true }
+        );
+      } else {
+        reportRefreshFailure(userKey, "oauth_refresh: NationBuilder rejected the refresh token", {
+          http_status: response.status,
+          oauth_error: code,
+        });
+      }
       return false;
     }
 
@@ -351,24 +242,24 @@ async function doRefresh(): Promise<boolean> {
       expires_in?: number;
     };
 
-    tokenData = {
+    const wasHealthy = user.refreshHealthy;
+    tokenStore.setUserTokens(userKey, {
       accessToken: data.access_token,
       // NB doesn't always return a new refresh token; keep the current one when it doesn't.
-      refreshToken: data.refresh_token ?? tokenData.refreshToken,
-      expiresAt: data.expires_in
-        ? Date.now() + data.expires_in * 1000
-        : null,
-    };
+      refreshToken: data.refresh_token ?? user.refreshToken,
+      // Default to a 23h fuse (NB tokens live 24h) rather than null when
+      // expires_in is absent: null previously meant "never refresh this,"
+      // permanently, since refreshTokenIfNeeded() treated null expiresAt as
+      // "nothing to do" — the only thing that ever caught a token in that
+      // state was the 401 path on an actual tool call.
+      expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : Date.now() + 23 * 60 * 60 * 1000,
+    });
 
-    console.error("OAuth token refreshed successfully");
-    // Recovery: clear the window so the next breakage alerts immediately
-    // instead of being swallowed by a throttle window left over from before
-    // this fix.
-    if (!refreshHealthy) {
-      refreshHealthy = true;
-      resetThrottle(REFRESH_THROTTLE_KEY);
-    }
-    persistTokens(tokenData);
+    console.error(`NationBuilder token refreshed for ${tag}`);
+    lastRefreshFailedAt.delete(userKey);
+    // Recovery: clear this user's throttle window so their next breakage
+    // alerts immediately instead of being swallowed by a stale window.
+    if (!wasHealthy) resetThrottle(`oauth_refresh_failed:${tag}`);
     return true;
   } catch (error) {
     // A SyntaxError parsing a 200 response quotes the offending body in its
@@ -377,26 +268,85 @@ async function doRefresh(): Promise<boolean> {
     const safe = error instanceof SyntaxError
       ? new Error("SyntaxError parsing token response (body withheld)")
       : error;
-    console.error("Token refresh error:", safeErr(safe));
-    reportRefreshFailure("oauth_refresh: request to NationBuilder failed", { phase: "network_or_parse" }, safe);
+    console.error(`Token refresh error for ${tag}:`, safeErr(safe));
+    lastRefreshFailedAt.set(userKey, Date.now());
+    reportRefreshFailure(userKey, "oauth_refresh: request to NationBuilder failed", { phase: "network_or_parse" }, { rawError: safe });
     return false;
   }
 }
 
-/** Refresh the token if we have a refresh token and it's near expiry */
-export async function refreshTokenIfNeeded(): Promise<void> {
-  if (!tokenData || !tokenData.refreshToken || !tokenData.expiresAt) return;
+/**
+ * Refresh one user's NationBuilder token. Safe to call concurrently for the
+ * same user — a second caller while a refresh is already in flight awaits
+ * the same promise rather than sending a second refresh_token grant (which
+ * would race the first for a single-use token). Returns false, without a
+ * network call, within NEGATIVE_CACHE_MS of a failed attempt.
+ */
+export async function refreshUserToken(userKey: string): Promise<boolean> {
+  const inFlight = refreshInFlight.get(userKey);
+  if (inFlight) return inFlight;
 
-  // Refresh if within 5 minutes of expiry
-  const fiveMinutes = 5 * 60 * 1000;
-  if (Date.now() < tokenData.expiresAt - fiveMinutes) return;
+  const failedAt = lastRefreshFailedAt.get(userKey);
+  if (failedAt !== undefined && Date.now() - failedAt < NEGATIVE_CACHE_MS) return false;
 
-  await doRefresh();
+  const promise = doRefreshUser(userKey).finally(() => {
+    refreshInFlight.delete(userKey);
+  });
+  refreshInFlight.set(userKey, promise);
+  return promise;
 }
 
-/** Force a token refresh (e.g. after a 401). Returns true if successful. */
+/** Force a refresh of the legacy identity (e.g. after a 401). Kept as the
+ *  external contract index.ts's HTTP-mode tokenGetter still relies on until
+ *  session/user binding lands. */
 export async function forceRefreshToken(): Promise<boolean> {
-  return doRefresh();
+  return refreshUserToken(LEGACY_USER_KEY);
+}
+
+const SWEEP_REFRESH_WINDOW_MS = 60 * 60 * 1000; // refresh once inside 60 min of expiry
+const SWEEP_GAP_MS = 250; // spacing between refreshes in one sweep pass
+
+/**
+ * Refresh every user whose token is expired, unknown, or due soon —
+ * sequentially, with a small gap between each, since NationBuilder's rate
+ * limit is per IP and this container shares one IP across every connected
+ * person; a burst of N refreshes in one tick is a needless spike against
+ * that same budget every tool call also draws from. Also prunes stale
+ * entries (see auth/store.ts) so the store doesn't grow without bound
+ * across restarts and re-authorizations.
+ */
+export async function sweepUserTokens(): Promise<void> {
+  for (const userKey of tokenStore.allUserKeys()) {
+    const user = tokenStore.getUser(userKey);
+    if (!user || user.revoked || !user.refreshToken) continue;
+
+    const dueSoon = user.expiresAt === null || Date.now() > user.expiresAt - SWEEP_REFRESH_WINDOW_MS;
+    if (!dueSoon) continue;
+
+    await refreshUserToken(userKey);
+    await new Promise((resolve) => setTimeout(resolve, SWEEP_GAP_MS));
+  }
+
+  tokenStore.pruneUsers();
+  tokenStore.pruneLegacyUserIfStale();
+  tokenStore.pruneClients();
+}
+
+/**
+ * Exercise every stored refresh token once at startup — a restart otherwise
+ * leaves everyone's `expiresAt` however it was at shutdown, so nothing would
+ * touch a stale token until that person's first tool call took a 401. This
+ * either re-establishes each rotation chain (and re-persists it) or surfaces
+ * a dead refresh token in the deploy logs immediately, instead of as a
+ * broken connector for whoever tries first.
+ */
+export async function bootstrapToken(): Promise<void> {
+  const userKeys = tokenStore.allUserKeys();
+  if (userKeys.length === 0) {
+    console.error("No connected NationBuilder users at startup.");
+    return;
+  }
+  await sweepUserTokens();
 }
 
 /**
@@ -409,6 +359,11 @@ export async function forceRefreshToken(): Promise<boolean> {
  *
  * 404, not 401: a wrong path segment shouldn't confirm that a gated route
  * exists at all.
+ *
+ * This gate — and the routes it protects — are the pre-per-user shared flow
+ * and are superseded once the Authorization Server (src/auth/provider.ts)
+ * ships; kept working as-is until then so there's a single migration point
+ * rather than two.
  */
 function requireOauthAuth(req: Request, res: Response, next: NextFunction): void {
   if (isAuthorized(req, req.params.oauthSecret)) {
@@ -597,16 +552,11 @@ export function createOAuthRouter(): Router {
         created_at?: number;
       };
 
-      tokenData = {
+      tokenStore.setUserTokens(LEGACY_USER_KEY, {
         accessToken: data.access_token,
         refreshToken: data.refresh_token ?? null,
-        expiresAt: data.expires_in
-          ? Date.now() + data.expires_in * 1000
-          : null,
-      };
-
-      // Persist to the volume so tokens survive restarts
-      const persisted = persistTokens(tokenData);
+        expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : Date.now() + 23 * 60 * 60 * 1000,
+      });
 
       const expiryInfo = data.expires_in
         ? `Token expires in ${Math.round(data.expires_in / 3600)} hours (auto-refresh enabled).`
@@ -615,7 +565,8 @@ export function createOAuthRouter(): Router {
       // Say so on the page rather than only in the logs — whoever just clicked
       // through is the one person positioned to fix a bad volume mount, and
       // otherwise they'd only find out at the next restart.
-      const persistenceNote = persisted
+      const storeStatus = tokenStore.getStoreStatus();
+      const persistenceNote = storeStatus.writable
         ? `<p style="color:#666;font-size:14px">Tokens saved to persistent storage — they will survive restarts.</p>`
         : `<p style="color:#b00;font-size:14px"><strong>Warning:</strong> tokens could NOT be saved to persistent storage. ` +
           `They are in memory only, so the next restart will require re-authorizing here again. ` +
@@ -661,7 +612,8 @@ export function createOAuthRouter(): Router {
   // GET /oauth/:oauthSecret/status — check current auth state
   router.get("/oauth/:oauthSecret/status", requireOauthAuth, (_req, res) => {
     const oauthConfigured = isOAuthConfigured();
-    const hasOAuthToken = !!tokenData;
+    const legacyUser = tokenStore.getUser(LEGACY_USER_KEY);
+    const hasOAuthToken = !!legacyUser && !legacyUser.revoked;
     const hasStaticToken = !!process.env.NATIONBUILDER_ACCESS_TOKEN;
 
     res.json({
@@ -669,13 +621,11 @@ export function createOAuthRouter(): Router {
       hasOAuthToken,
       hasStaticToken,
       activeMethod: hasOAuthToken ? "oauth" : hasStaticToken ? "static_token" : "none",
-      tokenExpiry: tokenData?.expiresAt
-        ? new Date(tokenData.expiresAt).toISOString()
-        : null,
-      hasRefreshToken: !!tokenData?.refreshToken,
+      tokenExpiry: legacyUser?.expiresAt ? new Date(legacyUser.expiresAt).toISOString() : null,
+      hasRefreshToken: !!legacyUser?.refreshToken,
       // Check this BEFORE authorizing: if writable is false, the token you're
       // about to obtain won't survive the next restart.
-      tokenStore: getTokenStoreStatus(),
+      tokenStore: tokenStore.getStoreStatus(),
     });
   });
 
