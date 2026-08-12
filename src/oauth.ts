@@ -23,7 +23,6 @@
 import { Router } from "express";
 import { reportError, reportErrorThrottled, resetThrottle, safeErr } from "./utils/errorReporter.js";
 import * as tokenStore from "./auth/store.js";
-import { LEGACY_USER_KEY } from "./auth/store.js";
 import { verifyMcpToken } from "./auth/tokens.js";
 import { completeUpstreamAuth } from "./auth/provider.js";
 
@@ -93,37 +92,16 @@ export function isOAuthConfigured(): boolean {
   return !!(clientId && clientSecret && callbackUrl);
 }
 
-/**
- * Hydrate the legacy identity from env vars, if nothing was persisted (or
- * migrated) yet. The store's own load() already handles the "an old
- * pre-per-user file exists" migration automatically and lazily — this is
- * only the remaining case: no file at all yet, first boot, env vars as the
- * seed. This identity is a migration artifact only — nothing can create a
- * new one interactively now that the shared-secret authorize route is gone;
- * it exists solely so a pre-existing single-token deploy doesn't lose its
- * NationBuilder connection outright the moment this ships.
- */
-export function initTokenFromEnv(): void {
-  if (tokenStore.getUser(LEGACY_USER_KEY)) return;
-
-  const accessToken = process.env.NATIONBUILDER_ACCESS_TOKEN;
-  const refreshToken = process.env.NATIONBUILDER_REFRESH_TOKEN;
-  if (!accessToken) return;
-
-  tokenStore.setUserTokens(LEGACY_USER_KEY, {
-    accessToken,
-    refreshToken: refreshToken ?? null,
-    expiresAt: null, // unknown — the startup sweep will establish it
-  });
-  console.error(
-    `No persisted token yet — loaded from env vars (refresh token: ${refreshToken ? "yes" : "no"})`
-  );
-}
-
-/** Returns the current (legacy-identity) OAuth access token, or null. */
-export function getOAuthToken(): string | null {
-  return tokenStore.getUserAccessToken(LEGACY_USER_KEY);
-}
+// Deliberately no env-var seeding path for LEGACY_USER_KEY anymore
+// (there used to be one here, mirroring NATIONBUILDER_ACCESS_TOKEN/
+// NATIONBUILDER_REFRESH_TOKEN into the store on first boot). index.ts's
+// validateEnv() now refuses to boot in HTTP mode with either var set, so
+// there is never a legitimate env-var seed to read. The only way
+// LEGACY_USER_KEY can still exist is the store's own load() migrating a
+// genuinely pre-existing single-token file (see auth/store.ts) — a
+// migration artifact, not an ongoing feature. Similarly, no
+// getOAuthToken() either: nothing outside the store needs the legacy
+// identity's token value directly anymore.
 
 // --- NationBuilder token exchange (used by the Authorization Server's
 // upstream leg — see src/auth/provider.ts's completeUpstreamAuth) ----------

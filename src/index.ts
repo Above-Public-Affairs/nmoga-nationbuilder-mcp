@@ -20,7 +20,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import { createNationBuilderClient, NO_TOKEN_PREFIX } from "./client/nationbuilder.js";
 import type { NationBuilderClientOptions } from "./client/nationbuilder.js";
-import { bootstrapToken, createOAuthRouter, getOAuthToken, initTokenFromEnv, isOAuthConfigured, refreshUserToken, sweepUserTokens } from "./oauth.js";
+import { bootstrapToken, createOAuthRouter, isOAuthConfigured, refreshUserToken, sweepUserTokens } from "./oauth.js";
 import { getStoreStatus, getUserAccessToken, userTag as storeUserTag } from "./auth/store.js";
 import { createNationBuilderOAuthProvider } from "./auth/provider.js";
 import { wellKnownAliasRouter, mcpCorsMiddleware } from "./auth/wellKnown.js";
@@ -114,21 +114,45 @@ function validateEnv(): { slug: string; staticToken: string | null } {
     throw new Error("missing required environment variable: NATIONBUILDER_SLUG");
   }
 
-  if (!staticToken && !isOAuthConfigured()) {
-    console.error(
-      "Warning: No NATIONBUILDER_ACCESS_TOKEN and OAuth not configured. " +
-      "Set NATIONBUILDER_ACCESS_TOKEN or configure OAuth (NATIONBUILDER_CLIENT_ID, NATIONBUILDER_CLIENT_SECRET)."
-    );
-    // Boots anyway, but every tool call will fail until someone sets a
-    // credential — worth a row, not just a log line nobody's watching.
-    reportError({
-      category: "auth_error",
-      message: "startup: no NATIONBUILDER_ACCESS_TOKEN and OAuth is not configured",
-      context: {
-        has_client_id: !!process.env.NATIONBUILDER_CLIENT_ID,
-        has_callback_url: !!(process.env.NATIONBUILDER_OAUTH_CALLBACK_URL || process.env.RAILWAY_PUBLIC_DOMAIN),
-      },
-    });
+  if (process.env.PORT) {
+    // HTTP mode. Per-user NationBuilder OAuth (src/auth/provider.ts) is the
+    // only supported path to /mcp now — nothing in this codebase reads
+    // NATIONBUILDER_ACCESS_TOKEN/REFRESH_TOKEN into a live tool call
+    // anymore. Refuse to boot with either set rather than let it sit as an
+    // inert credential that LOOKS like a fallback but silently isn't one:
+    // that ambiguity is exactly what this migration exists to close, and a
+    // loud boot failure is a better place to discover a leftover Railway
+    // env var than a quiet log line nobody's watching.
+    if (staticToken || process.env.NATIONBUILDER_REFRESH_TOKEN) {
+      throw new Error(
+        "NATIONBUILDER_ACCESS_TOKEN and NATIONBUILDER_REFRESH_TOKEN must not be set in HTTP mode " +
+        "(PORT is set). Per-user NationBuilder OAuth is the only supported path to /mcp — delete both " +
+        "vars from this service's environment. (stdio/local Claude Desktop use is unaffected: it never " +
+        "sets PORT and still requires NATIONBUILDER_ACCESS_TOKEN.)"
+      );
+    }
+    if (!isOAuthConfigured()) {
+      console.error(
+        "Warning: OAuth is not configured (NATIONBUILDER_CLIENT_ID/NATIONBUILDER_CLIENT_SECRET/callback " +
+        "URL). HTTP mode has no other way to authenticate now — every /mcp request will be rejected " +
+        "until this is set."
+      );
+      // Boots anyway (so /health stays reachable for diagnosis), but every
+      // /mcp request will 401 until this is fixed — worth a row, not just a
+      // log line nobody's watching.
+      reportError({
+        category: "auth_error",
+        message: "startup: HTTP mode with OAuth not configured — /mcp is unreachable",
+        context: {
+          has_client_id: !!process.env.NATIONBUILDER_CLIENT_ID,
+          has_callback_url: !!(process.env.NATIONBUILDER_OAUTH_CALLBACK_URL || process.env.RAILWAY_PUBLIC_DOMAIN),
+        },
+      });
+    }
+  } else if (!staticToken) {
+    // stdio mode. startStdioServer() throws on a missing static token too;
+    // warn here so it's visible even before that path runs.
+    console.error("Warning: No NATIONBUILDER_ACCESS_TOKEN set — required for stdio mode.");
   }
 
   return { slug, staticToken };
@@ -173,7 +197,7 @@ function createServer(
   return server;
 }
 
-async function startSseServer(slug: string, staticToken: string | null): Promise<void> {
+async function startSseServer(slug: string): Promise<void> {
   const port = parseInt(process.env.PORT || "3000", 10);
   const app = express();
   // Trust exactly one hop (Railway's own proxy) so req.ip/req.protocol reflect
@@ -277,12 +301,13 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
 
   // Health check — deliberately the one route left unauthenticated, so
   // Railway's health probe (which sends no credentials) keeps working.
+  // Deliberately minimal: liveness only. "Who's connected and are they
+  // healthy" is /oauth/status's job, not this one's.
   app.get("/health", (_req, res) => {
-    const oauthToken = getOAuthToken();
     res.json({
       status: "ok",
       name: "nmoga-nationbuilder-mcp",
-      auth: oauthToken ? "oauth" : staticToken ? "static_token" : "none",
+      oauthConfigured: isOAuthConfigured(),
     });
   });
 
@@ -510,8 +535,9 @@ async function startSseServer(slug: string, staticToken: string | null): Promise
         console.error(`Token store: ${store.path} (writable — tokens will survive restarts)`);
       } else {
         console.error(
-          `CRITICAL: token store not writable (${store.reason}). Tokens will be ` +
-          `in memory only and every restart will require re-running /oauth/authorize.`
+          `CRITICAL: token store not writable (${store.reason}). Every connected person's ` +
+          `NationBuilder credential is in memory only — a restart will force everyone to ` +
+          `reconnect their connector in claude.ai and log into NationBuilder again.`
         );
       }
     }
@@ -625,15 +651,12 @@ async function main(): Promise<void> {
 
   const { slug, staticToken } = validateEnv();
 
-  // Hydrate OAuth token from env vars (if persisted from prior session)
-  if (isOAuthConfigured()) {
-    initTokenFromEnv();
-  }
-
-  // If PORT is set, use SSE transport (Railway deployment)
-  // Otherwise, use stdio transport (local Claude Desktop)
+  // If PORT is set, use Streamable HTTP (Railway deployment) — per-user
+  // NationBuilder OAuth only; validateEnv() already refused to boot if a
+  // static/env token is set alongside it. Otherwise, use stdio transport
+  // (local Claude Desktop), which still needs the static token directly.
   if (process.env.PORT) {
-    await startSseServer(slug, staticToken);
+    await startSseServer(slug);
   } else {
     await startStdioServer(slug, staticToken);
   }
