@@ -18,23 +18,27 @@ export function registerListTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_lists",
-    "List all saved lists/segments in NationBuilder.",
     {
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Lists",
+      description: "List all saved lists/segments in NationBuilder.",
+      inputSchema: {
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -69,24 +73,28 @@ export function registerListTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_list_people",
-    "Get the people in a specific saved list/segment in NationBuilder.",
     {
-      list_id: z.string().describe("The NationBuilder list ID"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "Get List People",
+      description: "Get the people in a specific saved list/segment in NationBuilder.",
+      inputSchema: {
+        list_id: z.string().describe("The NationBuilder list ID"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -133,13 +141,17 @@ export function registerListTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "create_list",
-    "Creates a NEW saved list/segment in NationBuilder. This does NOT overwrite existing lists.",
     {
-      name: z.string().describe("Name for the new list"),
-      slug: z.string().optional().describe("URL-friendly slug (auto-generated from name if omitted)"),
-      author_id: z.string().describe("The signup ID of the list author/owner"),
+      title: "Create List",
+      description: "Creates a NEW saved list/segment in NationBuilder. This does NOT overwrite existing lists.",
+      inputSchema: {
+        name: z.string().describe("Name for the new list"),
+        slug: z.string().optional().describe("URL-friendly slug (auto-generated from name if omitted)"),
+        author_id: z.string().describe("The signup ID of the list author/owner"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
       try {
@@ -174,12 +186,16 @@ export function registerListTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "add_person_to_list",
-    "Add a person (signup) to a saved list in NationBuilder.",
     {
-      list_id: z.string().describe("The NationBuilder list ID"),
-      person_id: z.string().describe("The signup ID of the person to add"),
+      title: "Add Person to List",
+      description: "Add a person (signup) to a saved list in NationBuilder.",
+      inputSchema: {
+        list_id: z.string().describe("The NationBuilder list ID"),
+        person_id: z.string().describe("The signup ID of the person to add"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
       try {
@@ -200,12 +216,16 @@ export function registerListTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "remove_person_from_list",
-    "Remove a person (signup) from a saved list in NationBuilder.",
     {
-      list_id: z.string().describe("The NationBuilder list ID"),
-      person_id: z.string().describe("The signup ID of the person to remove"),
+      title: "Remove Person from List",
+      description: "Remove a person (signup) from a saved list in NationBuilder.",
+      inputSchema: {
+        list_id: z.string().describe("The NationBuilder list ID"),
+        person_id: z.string().describe("The signup ID of the person to remove"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async (params) => {
       try {

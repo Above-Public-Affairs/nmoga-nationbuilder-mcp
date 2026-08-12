@@ -16,31 +16,35 @@ export function registerPageTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_pages",
-    "List website and landing pages in NationBuilder with optional filters.",
     {
-      page_type: z
-        .string()
-        .optional()
-        .describe("Filter by page type (e.g. 'basic', 'event', 'petition', 'donation', 'survey')"),
-      status: z
-        .string()
-        .optional()
-        .describe("Filter by page status"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Pages",
+      description: "List website and landing pages in NationBuilder with optional filters.",
+      inputSchema: {
+        page_type: z
+          .string()
+          .optional()
+          .describe("Filter by page type (e.g. 'basic', 'event', 'petition', 'donation', 'survey')"),
+        status: z
+          .string()
+          .optional()
+          .describe("Filter by page status"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -83,11 +87,15 @@ export function registerPageTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_page",
-    "Get full details for a specific page by its NationBuilder ID.",
     {
-      page_id: z.string().describe("The NationBuilder page ID"),
+      title: "Get Page",
+      description: "Get full details for a specific page by its NationBuilder ID.",
+      inputSchema: {
+        page_id: z.string().describe("The NationBuilder page ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -111,23 +119,27 @@ export function registerPageTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "list_sites",
-    "List all sites in NationBuilder.",
     {
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Sites",
+      description: "List all sites in NationBuilder.",
+      inputSchema: {
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

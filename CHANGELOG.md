@@ -107,6 +107,20 @@ still needs Josh (Railway env vars, the actual claude.ai connector
 reconfiguration, and the live NationBuilder attribution acceptance test),
 and the alternatives considered.
 
+## [2026-08-12] — Five code-quality fixes (tag dedup, refresh race, timeout, shared rate limit)
+
+A same-day review found five issues, none yet user-visible incidents but each a live risk, on a branch that had diverged before the per-user OAuth work above landed. The tag-dedup and request-timeout fixes stand as-is. The refresh-race and per-session-rate-limiter fixes were reconciled into the per-user OAuth work above during the merge — that work already solves both problems more generally (`refreshUserToken`'s in-flight dedupe covers every person, not one shared token; `getRateLimiter(slug)` is the same per-nation-singleton fix) — so their code here didn't survive the merge, only their underlying diagnosis did.
+
+### Fixed
+- **`add_tags_to_person` could create near-duplicate tags.** It looked up an existing tag with an exact-case filter and created a new one on any miss — including a miss caused purely by casing (`cmte_legislative` vs. an existing `CMTE_Legislative`). Now resolves via the same case-insensitive `resolveTagByName` helper `list_people_with_tag` and `remove_tags_from_person` already use.
+- **No timeout on outbound NationBuilder requests.** A hung connection could hang a tool call indefinitely. Added a 15s per-attempt `AbortSignal.timeout`, sized to interact sensibly with the existing 3-attempt retry + backoff. 429 responses also now honor NationBuilder's `Retry-After` header (capped at the existing 30s backoff ceiling) instead of always using the fallback doubling backoff.
+- ~~Concurrent OAuth token refreshes could race~~ — superseded; see the per-user OAuth entry above.
+- ~~The rate limiter was per-session, not global~~ — superseded; see the per-user OAuth entry above.
+- **Stale `.env.example`.** Removed the `RAILWAY_API_TOKEN` block, which described the abandoned Railway-env-var token persistence mechanism replaced by the volume-based `persistTokens()` (see the entry below).
+
+### Added (same-day)
+- `connection_status` MCP tool, a connector icon (`src/favicon.ts` + `/favicon.ico`), and tool title/`readOnlyHint`/`destructiveHint` annotations across all resource tools via `server.registerTool()`. `connection_status` was rewritten during the merge to report the calling person's own connection (via `src/auth/store.ts`) rather than a server-wide auth state, which no longer exists as a single thing.
+
 ## [2026-08-12] — HTTP endpoints authenticated (URGENT security fix)
 
 A code review the same day found `/mcp` and `/sse` were completely unauthenticated in production: anyone with the URL got all 47 tools running with the org's OAuth token — full member PII (names, emails, phones, addresses, donations, support levels) plus write tools (`update_person`, `remove_tags_from_person`, list removals). `MCP_AUTH_TOKEN` was already set in Railway env but nothing in `src/` read it. `/oauth/authorize` and `/oauth/status` were equally open: any visitor could view token expiry/store-path/writability, or initiate an OAuth flow that — completed with any NationBuilder login on the nation — replaces the server's working token.
@@ -123,6 +137,18 @@ A code review the same day found `/mcp` and `/sse` were completely unauthenticat
 
 ### Migration note
 **Deploying this requires updating the claude.ai org Connector URL at the same time**, from the bare `/mcp` to `/mcp/<MCP_URL_SECRET>`, or the connector goes dark the moment this ships (bare `/mcp` now demands a Bearer header the connector can't send). See PROJECT-STATUS.md.
+
+## [2026-08-12] — tool annotations, connector icon, connection-status tool, batch tagging
+
+Four features from the same day's codebase review, landed together.
+
+### Added
+- **`connection_status`** (`src/tools/status.ts`) — a read-only tool that reports the server's own NationBuilder auth state from inside a chat: active auth method (oauth/static_token/none), OAuth token expiry, whether a refresh token is present, and whether the token store is writable. Previously this was only visible via the `/oauth/status` HTTP route (now gated — see the auth-fix entry above). Backed by a new `getAuthStatus()` export in `src/oauth.ts`, which that route now calls too instead of duplicating the logic inline.
+- **Connector icon** — `/favicon.ico` (served from `src/favicon.ts`, a teal "N" monogram, multi-resolution 16/32/48) plus a matching `serverInfo.icons` entry on the `McpServer` constructor in `src/index.ts`. Per the house rule on `*.up.railway.app` connector icons: this is groundwork only — Claude's connector list still derives the icon from the server's domain today and won't visibly change until either Claude honors `serverInfo.icons`/favicon fallback, or this server moves to a custom domain.
+- **Batch tagging** — `add_tags_to_person` and `remove_tags_from_person` (`src/tools/tags.ts`) now accept comma-separated `person_ids` (matching `get_person_tags`'s existing convention) instead of a single `person_id`, with per-person/per-tag success-or-failure reporting and a 50-person cap per call. `add_tags_to_person` resolves each tag name to an ID once per call rather than once per person, cutting a full-roster call from up to 3×N×M NationBuilder requests to roughly 1.5×M + N×M.
+
+### Changed
+- All 48 tools across `src/tools/` (17 existing files, plus the new `status.ts`) migrated from the deprecated `server.tool()` to `server.registerTool()` with explicit `title` and `annotations` (`readOnlyHint`/`destructiveHint`) on every tool — 38 read-only, 8 non-destructive writes, 2 destructive (`remove_person_from_list`, `remove_tags_from_person`). Handler logic and Zod schemas unchanged except for the `tags.ts` batch-tagging rewrite above.
 
 ## [2026-08-12] — two remaining silent-truncation gaps
 

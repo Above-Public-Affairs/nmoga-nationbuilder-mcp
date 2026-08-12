@@ -33,11 +33,15 @@ export function registerSignupProfileTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "get_signup_profile",
-    "Get the profile for a person in NationBuilder (bio, headline, social media links, etc.).",
     {
-      signup_id: z.string().describe("The NationBuilder signup ID"),
+      title: "Get Signup Profile",
+      description: "Get the profile for a person in NationBuilder (bio, headline, social media links, etc.).",
+      inputSchema: {
+        signup_id: z.string().describe("The NationBuilder signup ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -65,17 +69,21 @@ export function registerSignupProfileTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "update_signup_profile",
-    "WARNING: OVERWRITES existing profile fields with the values you provide. Any field you set will REPLACE the current value. Fields you omit are left unchanged. Verify the changes before proceeding.",
     {
-      signup_id: z.string().describe("The NationBuilder signup ID to update the profile for"),
-      bio: z.string().optional().describe("Biography text"),
-      headline: z.string().optional().describe("Profile headline"),
-      website: z.string().optional().describe("Website URL"),
-      facebook_url: z.string().optional().describe("Facebook profile URL"),
-      twitter_url: z.string().optional().describe("Twitter profile URL"),
-      linkedin_url: z.string().optional().describe("LinkedIn profile URL"),
+      title: "Update Signup Profile",
+      description: "WARNING: OVERWRITES existing profile fields with the values you provide. Any field you set will REPLACE the current value. Fields you omit are left unchanged. Verify the changes before proceeding.",
+      inputSchema: {
+        signup_id: z.string().describe("The NationBuilder signup ID to update the profile for"),
+        bio: z.string().optional().describe("Biography text"),
+        headline: z.string().optional().describe("Profile headline"),
+        website: z.string().optional().describe("Website URL"),
+        facebook_url: z.string().optional().describe("Facebook profile URL"),
+        twitter_url: z.string().optional().describe("Twitter profile URL"),
+        linkedin_url: z.string().optional().describe("LinkedIn profile URL"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
       try {

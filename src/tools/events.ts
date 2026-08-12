@@ -16,31 +16,35 @@ export function registerEventTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_events",
-    "List events in NationBuilder with optional date filtering.",
     {
-      starts_after: z
-        .string()
-        .optional()
-        .describe("Events starting after this date (YYYY-MM-DD)"),
-      starts_before: z
-        .string()
-        .optional()
-        .describe("Events starting before this date (YYYY-MM-DD)"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Events",
+      description: "List events in NationBuilder with optional date filtering.",
+      inputSchema: {
+        starts_after: z
+          .string()
+          .optional()
+          .describe("Events starting after this date (YYYY-MM-DD)"),
+        starts_before: z
+          .string()
+          .optional()
+          .describe("Events starting before this date (YYYY-MM-DD)"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -74,13 +78,17 @@ export function registerEventTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "list_event_rsvps",
-    "List RSVPs for a specific event in NationBuilder.",
     {
-      event_id: z.string().describe("The NationBuilder event ID"),
-      page_size: z.number().int().min(1).max(100).default(50).describe("Results per page"),
-      page_number: z.number().int().min(1).default(1).describe("Page number"),
+      title: "List Event RSVPs",
+      description: "List RSVPs for a specific event in NationBuilder.",
+      inputSchema: {
+        event_id: z.string().describe("The NationBuilder event ID"),
+        page_size: z.number().int().min(1).max(100).default(50).describe("Results per page"),
+        page_number: z.number().int().min(1).default(1).describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -116,11 +124,15 @@ export function registerEventTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_event",
-    "Get full details for a specific event by its NationBuilder ID.",
     {
-      event_id: z.string().describe("The NationBuilder event ID"),
+      title: "Get Event",
+      description: "Get full details for a specific event by its NationBuilder ID.",
+      inputSchema: {
+        event_id: z.string().describe("The NationBuilder event ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

@@ -17,23 +17,27 @@ export function registerPathTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_paths",
-    "List all paths (workflows/pipelines) in NationBuilder.",
     {
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Paths",
+      description: "List all paths (workflows/pipelines) in NationBuilder.",
+      inputSchema: {
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -67,11 +71,15 @@ export function registerPathTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_path",
-    "Get full details for a specific path by its NationBuilder ID, including steps.",
     {
-      path_id: z.string().describe("The NationBuilder path ID"),
+      title: "Get Path",
+      description: "Get full details for a specific path by its NationBuilder ID, including steps.",
+      inputSchema: {
+        path_id: z.string().describe("The NationBuilder path ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -109,35 +117,39 @@ export function registerPathTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "list_path_journeys",
-    "List path journeys (people progressing through workflows) with optional filters.",
     {
-      path_id: z
-        .string()
-        .optional()
-        .describe("Filter by path ID"),
-      signup_id: z
-        .string()
-        .optional()
-        .describe("Filter by person's signup ID"),
-      status: z
-        .string()
-        .optional()
-        .describe("Filter by journey status"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Path Journeys",
+      description: "List path journeys (people progressing through workflows) with optional filters.",
+      inputSchema: {
+        path_id: z
+          .string()
+          .optional()
+          .describe("Filter by path ID"),
+        signup_id: z
+          .string()
+          .optional()
+          .describe("Filter by person's signup ID"),
+        status: z
+          .string()
+          .optional()
+          .describe("Filter by journey status"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -182,11 +194,15 @@ export function registerPathTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_path_journey",
-    "Get full details for a specific path journey by its NationBuilder ID.",
     {
-      journey_id: z.string().describe("The NationBuilder path journey ID"),
+      title: "Get Path Journey",
+      description: "Get full details for a specific path journey by its NationBuilder ID.",
+      inputSchema: {
+        journey_id: z.string().describe("The NationBuilder path journey ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

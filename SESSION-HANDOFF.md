@@ -1,6 +1,6 @@
 # Session Handoff
 
-## Update (2026-08-12, third session) — per-user NationBuilder OAuth, not yet deployed
+## Update (2026-08-12, fourth session) — per-user NationBuilder OAuth, merged, not yet deployed
 
 The URL-secret fix described in the section below **did deploy** (Railway auto-deployed
 `990f436` successfully) — but `MCP_URL_SECRET` was never set on Railway, so the org
@@ -32,11 +32,46 @@ merged and is done. Seven commits, each independently reviewable:
 6. HTTP mode refuses to boot if a static NationBuilder token is set.
 7. Docs (this file, README, .env.example, CHANGELOG, PROJECT-STATUS).
 
-**Not merged or deployed.** See PROJECT-STATUS.md's URGENT To-Do for the full
-Railway-env + claude.ai-connector + NationBuilder-callback-URL coordination checklist —
-none of it can happen from this session. The connector is already dark, so there's no
-*additional* outage risk in taking the time to do this coordination correctly, but every
-person (team and non-team) will need to add their own personal connector once it ships.
+**Merged, not yet deployed.** This branch (`claude/per-user-nationbuilder-oauth`) has been
+merged with `origin/main`, which had diverged with two unrelated commits from a concurrent
+session (the "five code-quality fixes" and "tool annotations / connector icon /
+connection_status / batch tagging" sessions below) while this work was in progress. All
+core auth files (`oauth.ts`, `index.ts`, `client/nationbuilder.ts`, `rateLimiter.ts`)
+required manual reconciliation; the 17 tool files merged cleanly since they're orthogonal
+to auth. See PROJECT-STATUS.md's URGENT To-Do for the full Railway-env +
+claude.ai-connector + NationBuilder-callback-URL coordination checklist. As of this
+writing, `MCP_TOKEN_SIGNING_SECRET` has been set and verified on Railway, and the dead
+`MCP_URL_SECRET`/`MCP_AUTH_TOKEN`/`NATIONBUILDER_ACCESS_TOKEN`/`NATIONBUILDER_REFRESH_TOKEN`
+vars have been deleted; the NationBuilder OAuth callback URL has been confirmed unchanged.
+Still needed: full rebuild + re-verification of the merged code, then a fresh push-to-main
+confirmation (the merge changes what's landing, so the original "then we'll deploy" needs
+re-confirming against this combined diff), then every person (team and non-team) adding
+their own personal connector once it ships.
+
+## Update (2026-08-12, latest session) — five code-quality fixes, merged on top of the auth fix
+
+A separate same-day review (independent of the "HTTP endpoints authenticated" work below)
+found and fixed five issues: `add_tags_to_person` could create near-duplicate tags on a
+casing mismatch; concurrent 401s could race two OAuth token refreshes against
+NationBuilder's refresh-token rotation; outbound NationBuilder requests had no timeout;
+the rate limiter was built fresh per HTTP session instead of shared across the whole
+process (so concurrent connector sessions each thought they had the full request budget);
+and `.env.example` still described the abandoned `RAILWAY_API_TOKEN` mechanism. Full detail
+in `CHANGELOG.md`'s `[2026-08-12] — Five code-quality fixes` entry.
+
+**Branch history note:** this work started on a branch before the "HTTP endpoints
+authenticated" fix below landed on `main` from a concurrent session. Reconciled via
+`git stash` + fast-forward + `git stash pop`, with two real conflicts (`.env.example`,
+`src/index.ts` — both files the auth fix also touched) resolved by hand; `src/oauth.ts`
+merged clean since the two fixes touch disjoint functions. Rebuilt and re-verified
+(`npm run build`, plus the single-flight-refresh and shared-rate-limiter checks) against
+the merged result before pushing — the auth fix's `/mcp`/`/sse` restructuring (secret-path
+routes, `handleMcpRequest`/`handleSseConnect`) is what the shared-client hoist now plugs
+into. This confirms both fixes coexist correctly; it does not add new coverage beyond
+that. **Superseded during the per-user OAuth merge above:** the refresh-race and
+rate-limiter fixes were absorbed into that work's more general versions
+(`refreshUserToken`'s in-flight dedupe, `getRateLimiter(slug)`); the tag-dedup and
+outbound-timeout fixes stand as-is.
 
 ## Update (2026-08-12, second session) — HTTP endpoints authenticated, deployed but broken
 
@@ -58,26 +93,38 @@ The server is live on Railway (`nmoga-nationbuilder-mcp`, production environment
 (`/mcp`) as an org Connector, with legacy SSE (`/sse`) kept for older clients. Auth is
 OAuth against the `nmoga` NationBuilder nation, with a static-token fallback.
 
-**This session's fix (about to ship via `/push`):** a cross-check of everything already
-merged for the root incident (below) against the original nine-item defect list turned up
-two gaps still open, both the same failure mode as the rest — a tool answering confidently
-where the query never supported the answer:
+**This session's work (about to ship via `/push`):** four features from a same-day
+codebase review, unrelated to the tag-truncation incident below — planned first (plan mode,
+approved), then built.
 
-- **`resolveTagByName`'s case-insensitive fallback read one 100-row page.** A tag whose
-  stored casing differs from the caller's, sitting past the first 100 substring matches,
-  resolved to *"Tag not found ... the tag must exist in the nation"* — wrong about a tag
-  that exists. Fed `list_people_with_tag` and `advanced_search`'s `tag` param; being an
-  internal lookup, the new pagination warnings never reached the caller. Now paged (50-page
-  cap) with an early exit on match, so the common case still costs one request.
-- **A NationBuilder-rejected employer filter looked exactly like an empty organization.**
-  `findPeopleByEmployer` swallowed the 400 and returned `[]`; `list_org_members` said "No
-  people found," and `list_org_members_batch` didn't even count the org as an error (the
-  helper returned rather than threw), so it rendered as "searched successfully, 0 people."
-  Both now say so explicitly and point at `list_native_relationships`. This one mattered
-  most because `list_org_members` is the likely source of the incident's original 9-person
-  roster.
+1. **All 48 tools migrated from `server.tool()` to `server.registerTool()`** with explicit
+   `title` + `annotations` (`readOnlyHint`/`destructiveHint`). 38 read-only, 8 non-destructive
+   writes, 2 destructive (`remove_person_from_list`, `remove_tags_from_person`). No handler
+   logic changed; verified via a live `tools/list` call against a locally-running instance.
+2. **Connector icon groundwork**: `/favicon.ico` (`src/favicon.ts`, teal "N" monogram,
+   multi-resolution) plus a matching `serverInfo.icons` entry on the `McpServer` constructor.
+   **Not yet visible in the connector list** — Claude's connector UI still derives the icon
+   from the server's domain on shared `*.up.railway.app` hosts, per the house rule in the
+   global CLAUDE.md. A custom domain is the only current lever; that's a call for Josh, not
+   assumed here.
+3. **New `connection_status` tool** (`src/tools/status.ts`) — surfaces the same auth-state
+   info as `/oauth/status` (active method, token expiry, refresh token, token-store
+   writability) from inside a chat. Backed by a new `getAuthStatus()` export in `src/oauth.ts`
+   that the HTTP route now calls too, instead of duplicating the logic inline.
+4. **Batch tagging**: `add_tags_to_person`/`remove_tags_from_person` now take comma-separated
+   `person_ids` (cap 50, matching `get_person_tags`'s existing convention) instead of a single
+   `person_id`, with per-person/per-tag reporting. `add_tags_to_person` resolves each tag name
+   once per call, not once per person.
 
-**Previously merged for the same incident** (`69d6225`):
+**Verified so far:** clean `tsc` build; a locally-running instance (dummy token) confirmed
+`/favicon.ico` serves correctly, `serverInfo.icons` appears in `initialize`, all 48 tools
+appear in `tools/list` with correct titles/annotations, `connection_status` reports
+accurately, and the 50-person cap rejects a 51-ID batch cleanly. **Not yet verified:** batch
+tagging against real NationBuilder data (no live credential in-session) — first live use
+after deploy should confirm a multi-person tag add/remove actually round-trips.
+
+**Previously merged for the tag-truncation incident** (`69d6225`, `5d02630` — already
+shipped, unrelated to this session's work above):
 
 - **Honest pagination everywhere.** NationBuilder V2 sends no result total on any endpoint
   this server calls — confirmed live against `signups`, `signup_tags`, `signup_taggings`,
@@ -170,6 +217,13 @@ manual re-authorize until it's fixed.
 
 ## Next steps
 
+- **Decide on a custom domain for the connector icon** — `/favicon.ico` and `serverInfo.icons`
+  are live, but won't visibly change the connector-list icon until either Claude honors
+  those fields or this server moves off the shared `*.up.railway.app` host. Josh's call.
+- **Verify batch tagging live** — `add_tags_to_person`/`remove_tags_from_person` with
+  comma-separated `person_ids` was only exercised against a dummy local token this session.
+  First live call should confirm a multi-person add/remove round-trips and the tag-resolution
+  hoist (resolve each tag once per call, not once per person) behaves as expected.
 - ~~Confirm the persistence fix survives a real redeploy~~ — done 2026-08-11, verified by
   an actual restart.
 - ~~Reconcile `PROJECT-STATUS.md` with reality~~ — done 2026-08-11.

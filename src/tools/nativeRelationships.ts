@@ -16,24 +16,28 @@ export function registerNativeRelationshipTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_native_relationships",
-    "List NationBuilder relationships for a person (spouse, parent, board member, employer, etc.). Returns the relationship type and both connected people.",
     {
-      signup_id: z.string().describe("The NationBuilder signup ID to find relationships for"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Native Relationships",
+      description: "List NationBuilder relationships for a person (spouse, parent, board member, employer, etc.). Returns the relationship type and both connected people.",
+      inputSchema: {
+        signup_id: z.string().describe("The NationBuilder signup ID to find relationships for"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -119,15 +123,19 @@ export function registerNativeRelationshipTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "create_native_relationship",
-    "WARNING: Creates a relationship between two people in NationBuilder. This MAY OVERWRITE an existing relationship of the same type between these two signups. Double-check both signup IDs and the relationship type before proceeding.",
     {
-      first_signup_id: z.string().describe("The first person's signup ID"),
-      second_signup_id: z.string().describe("The second person's signup ID"),
-      relationship_type: z
-        .string()
-        .describe("Relationship type (e.g. 'spouse', 'parent', 'child', 'sibling', 'employer', 'employee', 'board_member')"),
+      title: "Create Native Relationship",
+      description: "WARNING: Creates a relationship between two people in NationBuilder. This MAY OVERWRITE an existing relationship of the same type between these two signups. Double-check both signup IDs and the relationship type before proceeding.",
+      inputSchema: {
+        first_signup_id: z.string().describe("The first person's signup ID"),
+        second_signup_id: z.string().describe("The second person's signup ID"),
+        relationship_type: z
+          .string()
+          .describe("Relationship type (e.g. 'spouse', 'parent', 'child', 'sibling', 'employer', 'employee', 'board_member')"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
       try {

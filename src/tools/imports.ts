@@ -15,27 +15,31 @@ export function registerImportTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_imports",
-    "List data imports in NationBuilder with optional status filter.",
     {
-      status: z
-        .string()
-        .optional()
-        .describe("Filter by import status"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Imports",
+      description: "List data imports in NationBuilder with optional status filter.",
+      inputSchema: {
+        status: z
+          .string()
+          .optional()
+          .describe("Filter by import status"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -74,11 +78,15 @@ export function registerImportTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_import",
-    "Get full details for a specific data import by its NationBuilder ID.",
     {
-      import_id: z.string().describe("The NationBuilder import ID"),
+      title: "Get Import",
+      description: "Get full details for a specific data import by its NationBuilder ID.",
+      inputSchema: {
+        import_id: z.string().describe("The NationBuilder import ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

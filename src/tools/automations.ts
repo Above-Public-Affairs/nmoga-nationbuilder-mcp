@@ -16,27 +16,31 @@ export function registerAutomationTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_automations",
-    "List all automations in NationBuilder.",
     {
-      status: z
-        .string()
-        .optional()
-        .describe("Filter by automation status"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Automations",
+      description: "List all automations in NationBuilder.",
+      inputSchema: {
+        status: z
+          .string()
+          .optional()
+          .describe("Filter by automation status"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -74,11 +78,15 @@ export function registerAutomationTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_automation",
-    "Get full details for a specific automation by its NationBuilder ID.",
     {
-      automation_id: z.string().describe("The NationBuilder automation ID"),
+      title: "Get Automation",
+      description: "Get full details for a specific automation by its NationBuilder ID.",
+      inputSchema: {
+        automation_id: z.string().describe("The NationBuilder automation ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -102,35 +110,39 @@ export function registerAutomationTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "list_automation_enrollments",
-    "List automation enrollments in NationBuilder, optionally filtered by automation or person.",
     {
-      automation_id: z
-        .string()
-        .optional()
-        .describe("Filter by automation ID"),
-      signup_id: z
-        .string()
-        .optional()
-        .describe("Filter by person's signup ID"),
-      status: z
-        .string()
-        .optional()
-        .describe("Filter by enrollment status"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Automation Enrollments",
+      description: "List automation enrollments in NationBuilder, optionally filtered by automation or person.",
+      inputSchema: {
+        automation_id: z
+          .string()
+          .optional()
+          .describe("Filter by automation ID"),
+        signup_id: z
+          .string()
+          .optional()
+          .describe("Filter by person's signup ID"),
+        status: z
+          .string()
+          .optional()
+          .describe("Filter by enrollment status"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

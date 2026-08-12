@@ -15,31 +15,35 @@ export function registerMailingTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_mailings",
-    "List email mailings/blasts in NationBuilder with optional filters.",
     {
-      status: z
-        .string()
-        .optional()
-        .describe("Filter by mailing status (e.g. 'draft', 'sent', 'queued')"),
-      since: z
-        .string()
-        .optional()
-        .describe("Mailings sent on or after this date (YYYY-MM-DD)"),
-      page_size: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe("Results per page (max 100)"),
-      page_number: z
-        .number()
-        .int()
-        .min(1)
-        .default(1)
-        .describe("Page number"),
+      title: "List Mailings",
+      description: "List email mailings/blasts in NationBuilder with optional filters.",
+      inputSchema: {
+        status: z
+          .string()
+          .optional()
+          .describe("Filter by mailing status (e.g. 'draft', 'sent', 'queued')"),
+        since: z
+          .string()
+          .optional()
+          .describe("Mailings sent on or after this date (YYYY-MM-DD)"),
+        page_size: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Results per page (max 100)"),
+        page_number: z
+          .number()
+          .int()
+          .min(1)
+          .default(1)
+          .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -83,11 +87,15 @@ export function registerMailingTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_mailing",
-    "Get full details for a specific mailing by its NationBuilder ID.",
     {
-      mailing_id: z.string().describe("The NationBuilder mailing ID"),
+      title: "Get Mailing",
+      description: "Get full details for a specific mailing by its NationBuilder ID.",
+      inputSchema: {
+        mailing_id: z.string().describe("The NationBuilder mailing ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {

@@ -101,13 +101,17 @@ export function registerRelationshipTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_org_members",
-    "List people whose employer field matches an organization's name. NOTE: This matches on the employer text field, NOT formal NationBuilder relationships. For actual relationship records (employee_of, primary_contact_of), use list_native_relationships instead.",
     {
-      org_id: z
-        .string()
-        .describe("The NationBuilder signup ID of the organization"),
+      title: "List Org Members",
+      description: "List people whose employer field matches an organization's name. NOTE: This matches on the employer text field, NOT formal NationBuilder relationships. For actual relationship records (employee_of, primary_contact_of), use list_native_relationships instead.",
+      inputSchema: {
+        org_id: z
+          .string()
+          .describe("The NationBuilder signup ID of the organization"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -216,15 +220,19 @@ export function registerRelationshipTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "list_org_members_batch",
-    "Find all people whose employer field matches multiple organizations' names. NOTE: This matches on the employer text field, NOT formal NationBuilder relationships. For actual relationship records, use list_native_relationships instead.",
     {
-      org_ids: z
-        .string()
-        .describe(
-          "Comma-separated list of NationBuilder org signup IDs (e.g. '498900,498903,498967')"
-        ),
+      title: "List Org Members Batch",
+      description: "Find all people whose employer field matches multiple organizations' names. NOTE: This matches on the employer text field, NOT formal NationBuilder relationships. For actual relationship records, use list_native_relationships instead.",
+      inputSchema: {
+        org_ids: z
+          .string()
+          .describe(
+            "Comma-separated list of NationBuilder org signup IDs (e.g. '498900,498903,498967')"
+          ),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       const ids = params.org_ids

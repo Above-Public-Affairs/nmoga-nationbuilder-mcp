@@ -16,10 +16,12 @@ export function registerMembershipTools(
   server: McpServer,
   client: NationBuilderClient
 ): void {
-  server.tool(
+  server.registerTool(
     "list_memberships",
-    "List memberships in NationBuilder with optional filtering by person, status, or date.",
     {
+      title: "List Memberships",
+      description: "List memberships in NationBuilder with optional filtering by person, status, or date.",
+      inputSchema: {
       signup_id: z
         .string()
         .optional()
@@ -45,6 +47,8 @@ export function registerMembershipTools(
         .min(1)
         .default(1)
         .describe("Page number"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -96,11 +100,15 @@ export function registerMembershipTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get_membership",
-    "Get full details for a specific membership by its NationBuilder ID.",
     {
-      membership_id: z.string().describe("The NationBuilder membership ID"),
+      title: "Get Membership",
+      description: "Get full details for a specific membership by its NationBuilder ID.",
+      inputSchema: {
+        membership_id: z.string().describe("The NationBuilder membership ID"),
+      },
+      annotations: { readOnlyHint: true },
     },
     async (params) => {
       try {
@@ -125,18 +133,22 @@ export function registerMembershipTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     "create_membership",
-    "Creates a NEW membership record for a person. This does NOT overwrite or modify existing memberships — it adds a new one.",
     {
-      signup_id: z.string().describe("The signup ID of the person to create a membership for"),
-      membership_type_id: z.string().describe("The membership type ID"),
-      status: z
-        .string()
-        .default("active")
-        .describe("Membership status: 'active', 'grace period', 'expired', or 'canceled' (default: active)"),
-      started_at: z.string().optional().describe("Start date (YYYY-MM-DD)"),
-      expires_on: z.string().optional().describe("Expiration date (YYYY-MM-DD) — must be today or in the past"),
+      title: "Create Membership",
+      description: "Creates a NEW membership record for a person. This does NOT overwrite or modify existing memberships — it adds a new one.",
+      inputSchema: {
+        signup_id: z.string().describe("The signup ID of the person to create a membership for"),
+        membership_type_id: z.string().describe("The membership type ID"),
+        status: z
+          .string()
+          .default("active")
+          .describe("Membership status: 'active', 'grace period', 'expired', or 'canceled' (default: active)"),
+        started_at: z.string().optional().describe("Start date (YYYY-MM-DD)"),
+        expires_on: z.string().optional().describe("Expiration date (YYYY-MM-DD) — must be today or in the past"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
       try {

@@ -45,6 +45,8 @@ import { registerMailingTools } from "./tools/mailings.js";
 import { registerPageTools } from "./tools/pages.js";
 import { registerAutomationTools } from "./tools/automations.js";
 import { registerImportTools } from "./tools/imports.js";
+import { registerStatusTools } from "./tools/status.js";
+import { getFaviconBuffer } from "./favicon.js";
 
 // CRITICAL: Never use console.log() - it corrupts JSON-RPC on stdout
 // Always use console.error() for any logging/debugging
@@ -158,15 +160,34 @@ function validateEnv(): { slug: string; staticToken: string | null } {
   return { slug, staticToken };
 }
 
+/**
+ * `userKey` is passed separately from `clientOpts` (whose `userTag` is
+ * already a one-way hash, unsuitable for a store lookup) so the status tool
+ * can read that specific person's own record. Null in stdio mode, which has
+ * no per-user store to report on — the static token there isn't a NB OAuth
+ * grant, so "connection status" doesn't map the same way.
+ */
 function createServer(
   slug: string,
   tokenGetter: string | (() => string),
-  clientOpts: NationBuilderClientOptions = {}
+  clientOpts: NationBuilderClientOptions = {},
+  userKey: string | null = null
 ): McpServer {
+  const faviconUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/favicon.ico`
+    : "https://nmoga-nationbuilder-mcp-production.up.railway.app/favicon.ico";
+
   const server = new McpServer(
     {
       name: "nmoga-nationbuilder-mcp",
       version: "1.0.0",
+      icons: [
+        {
+          src: faviconUrl,
+          mimeType: "image/x-icon",
+          sizes: ["16x16", "32x32", "48x48"],
+        },
+      ],
     },
     {
       instructions: INSTRUCTIONS,
@@ -193,6 +214,7 @@ function createServer(
   registerPageTools(server, client);
   registerAutomationTools(server, client);
   registerImportTools(server, client);
+  if (userKey) registerStatusTools(server, userKey);
 
   return server;
 }
@@ -299,7 +321,17 @@ async function startSseServer(slug: string): Promise<void> {
     console.error("OAuth routes enabled: /oauth/callback (unauthenticated), /oauth/status (tiered)");
   }
 
-  // Health check — deliberately the one route left unauthenticated, so
+  // Connector icon — distinguishes this server in the claude.ai connector
+  // list from other unbranded MCPs (see src/favicon.ts). Deliberately left
+  // unauthenticated alongside /health: it's a static image with no PII and
+  // no write capability, and there's no way for an icon-fetching client to
+  // carry a secret path segment or Bearer header anyway.
+  app.get("/favicon.ico", (_req, res) => {
+    res.type("image/x-icon");
+    res.send(getFaviconBuffer());
+  });
+
+  // Health check — deliberately the other route left unauthenticated, so
   // Railway's health probe (which sends no credentials) keeps working.
   // Deliberately minimal: liveness only. "Who's connected and are they
   // healthy" is /oauth/status's job, not this one's.
@@ -448,10 +480,15 @@ async function startSseServer(slug: string): Promise<void> {
             }
           };
 
-          const server = createServer(slug, makeUserTokenGetter(userKey), {
-            onUnauthorized: () => refreshUserToken(userKey),
-            userTag: storeUserTag(userKey),
-          });
+          const server = createServer(
+            slug,
+            makeUserTokenGetter(userKey),
+            {
+              onUnauthorized: () => refreshUserToken(userKey),
+              userTag: storeUserTag(userKey),
+            },
+            userKey
+          );
           await server.connect(transport);
 
           // handleRequest processes the initialize and sets the session ID
