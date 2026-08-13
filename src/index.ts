@@ -285,13 +285,23 @@ async function startSseServer(slug: string): Promise<void> {
   // SESSION_IDLE_MS.
   const MAX_CONCURRENT_SESSIONS = 100;
   // Per-person cap on top of the global one, so a single runaway or buggy
-  // client can't consume the whole pool and 503 everyone else.
-  const MAX_SESSIONS_PER_USER = 10;
+  // client can't consume the whole pool and starve everyone else. Hit by
+  // evicting that person's own oldest session (see MAX_SESSIONS_PER_USER's
+  // use below), not by 503ing them — claude.ai's connector never sends
+  // DELETE, so a person opening several conversations in a 30-minute window
+  // used to lock themselves out of their own connector for the rest of the
+  // idle window (observed live 2026-08-13: ~50 consecutive 503s over 14
+  // minutes for one user). Raised from 10 now that hitting it is cheap
+  // instead of punitive.
+  const MAX_SESSIONS_PER_USER = 20;
 
   // Sessions live in memory only. Clients rarely send DELETE (Claude's connector
   // never does), so onclose alone leaves entries — and their McpServer instances —
-  // behind forever. Reap anything idle past this window.
-  const SESSION_IDLE_MS = 30 * 60 * 1000;
+  // behind forever. Reap anything idle past this window. Shortened from 30
+  // minutes alongside the eviction-on-cap change above: idle sessions now
+  // clear out faster on their own, so the cap is reached less often in the
+  // first place.
+  const SESSION_IDLE_MS = 15 * 60 * 1000;
 
   function dropSession(sessionId: string, reason: string): void {
     const transport = streamableTransports.get(sessionId);
@@ -435,10 +445,25 @@ async function startSseServer(slug: string): Promise<void> {
         } else if (req.method === "POST") {
           // Reject before spending a McpServer + transport on it — cheap
           // insurance against unbounded memory growth even with auth in front.
+          // Unlike the per-user cap below, this is never evicted around: it's
+          // shared across every connected person, so evicting someone else's
+          // session to make room for this one would be taking it away from a
+          // person who did nothing wrong. A global pool actually filling up
+          // is also a real capacity event worth a row, not just a log line —
+          // the per-user cap below is expected to bite occasionally and
+          // recovers on its own, this one means the server itself is out of
+          // headroom.
           if (streamableTransports.size >= MAX_CONCURRENT_SESSIONS) {
             console.error(
               `Rejecting new session — at capacity (${streamableTransports.size}/${MAX_CONCURRENT_SESSIONS})`
             );
+            reportErrorThrottled({
+              category: "api_error",
+              message: "mcp: at global concurrent session limit",
+              context: { limit: MAX_CONCURRENT_SESSIONS },
+              throttleKey: "mcp_session_capacity",
+              throttleMs: 15 * 60 * 1000,
+            });
             res.status(503).json({
               error: "server_busy",
               message: `Server is at its concurrent session limit (${MAX_CONCURRENT_SESSIONS}). Try again shortly.`,
@@ -446,19 +471,33 @@ async function startSseServer(slug: string): Promise<void> {
             return;
           }
 
+          // Per-person cap: rather than 503ing the person, evict their own
+          // least-recently-used session to make room. A fresh initialize
+          // request means the client has already moved on from whatever
+          // created those older sessions (claude.ai's connector never sends
+          // DELETE, so idle sessions just pile up until the reaper gets to
+          // them) — refusing the new one instead of retiring an old one used
+          // to lock a person out of their own connector for up to
+          // SESSION_IDLE_MS. Only ever touches this user's own sessions,
+          // never another person's.
           let sessionsForThisUser = 0;
-          for (const owner of sessionUser.values()) {
-            if (owner === userKey) sessionsForThisUser++;
+          let lruSessionId: string | null = null;
+          let lruLastSeen = Infinity;
+          for (const [sid, owner] of sessionUser) {
+            if (owner !== userKey) continue;
+            sessionsForThisUser++;
+            const lastSeen = sessionLastSeen.get(sid) ?? 0;
+            if (lastSeen < lruLastSeen) {
+              lruLastSeen = lastSeen;
+              lruSessionId = sid;
+            }
           }
-          if (sessionsForThisUser >= MAX_SESSIONS_PER_USER) {
+          if (sessionsForThisUser >= MAX_SESSIONS_PER_USER && lruSessionId) {
             console.error(
-              `Rejecting new session for ${storeUserTag(userKey)} — at per-user limit (${sessionsForThisUser}/${MAX_SESSIONS_PER_USER})`
+              `At per-user session limit (${sessionsForThisUser}/${MAX_SESSIONS_PER_USER}) for ` +
+              `${storeUserTag(userKey)} — evicting oldest session ${lruSessionId} to make room`
             );
-            res.status(503).json({
-              error: "server_busy",
-              message: `You have reached the concurrent session limit (${MAX_SESSIONS_PER_USER}) for this connector. Close another session and try again.`,
-            });
-            return;
+            dropSession(lruSessionId, "evicted: per-user session limit reached");
           }
 
           // New session — first POST has no session ID (the initialize request)

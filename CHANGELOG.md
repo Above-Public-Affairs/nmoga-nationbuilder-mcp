@@ -1,5 +1,21 @@
 # Changelog
 
+## [2026-08-13]
+
+### Fixed
+- **The per-user session cap now evicts instead of locking people out.**
+  Production logs showed one person hitting the cap (10) and then getting
+  ~50 consecutive `503`s over 14 minutes, because claude.ai's connector
+  never sends `DELETE` and idle sessions only cleared on a 30-minute timer —
+  opening a few conversations in that window was enough to shut yourself out
+  of your own connector until the reaper caught up. Hitting the per-user cap
+  now drops that same person's own least-recently-used session to make room
+  instead of refusing the new one; raised the cap 10 → 20 and shortened the
+  idle reaper 30min → 15min alongside it. The separate global session cap
+  (100, shared across everyone) still refuses rather than evicts — but it
+  now files a throttled error report instead of only a log line, since
+  actually filling it is a real capacity event.
+
 ## [2026-08-12] — Per-user NationBuilder OAuth (replaces the shared-secret gate)
 
 Same-day follow-up to the URL-secret fix below: after shipping it, the org

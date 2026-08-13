@@ -2,10 +2,13 @@
 
 ## Current Status
 
-**Phase:** A same-day sequel to the URL-secret auth fix (still on this branch, not yet
-deployed — see the URGENT To-Do below). The URL-secret model went out, `MCP_URL_SECRET`
-was never set on Railway, and the connector went dark for everyone. Rather than restore
-that model, this branch replaces it entirely with **per-user NationBuilder OAuth**: each
+**Phase:** Per-user NationBuilder OAuth is live in production (deployed 2026-08-12,
+confirmed via live `search_people`/`advanced_search`/`connection_status` calls and Railway
+deploy logs). This branch's original "not yet deployed" note is stale — see the URGENT
+To-Do below for what's still outstanding. The URL-secret model that preceded it went out
+with `MCP_URL_SECRET` never set on Railway, taking the connector down for everyone. Rather
+than restore that model, this rebuilds auth entirely around **per-user NationBuilder
+OAuth**: each
 person adds this MCP as their **own personal** claude.ai connector (no Organization
 Connector, no shared secret) and logs into NationBuilder themselves. Every tool call runs
 under that person's own NationBuilder token, so NationBuilder's own audit log attributes
@@ -32,6 +35,14 @@ your own record only behind your own bearer. `/health` is unauthenticated livene
 
 ## Completed
 
+- [x] **Per-user session cap now evicts instead of locking people out (2026-08-13):**
+  live production logs showed one person hit the per-user cap (10) and then get ~50
+  consecutive `503`s over 14 minutes, because claude.ai's connector never sends `DELETE`
+  and idle sessions only cleared on a 30-minute timer. A new `initialize` request that
+  finds the cap full now evicts that same person's own least-recently-used session
+  instead of refusing; cap raised 10 → 20, idle reaper shortened 30min → 15min. The
+  separate global cap (100, shared) still refuses but now files a throttled error report
+  instead of only a log line. See CHANGELOG.md.
 - [x] **Per-user NationBuilder OAuth (2026-08-12):** replaces the URL-secret gate below entirely. `/mcp` now requires a real, individual NationBuilder login per person — see "Current Status" above for the architecture and CHANGELOG.md for the full list of what changed. Verified end-to-end against a scripted fake NationBuilder upstream (no live nation credential needed): the full register→authorize→NB→callback→token round trip, single-use code + PKCE-mismatch rejection, refresh rotation, identity-key stability across re-authorization, **the session-hijack test** (person B's own valid bearer + person A's session id → `403`, person A's session keeps working after), the per-user session cap, `/oauth/status` tiering, and the HTTP-mode boot refusal when a static token is set. During the merge with the concurrent five-fixes work below, this also absorbed the connector icon, `connection_status` tool (rewritten for per-user), and tool annotations. **Not yet deployed — see the URGENT To-Do below**, which also covers what's still unverifiable without a live nation and without Josh's action in claude.ai/Railway.
 - [x] **Five code-quality fixes (2026-08-12, on a branch that diverged before the above landed):** `add_tags_to_person` near-duplicate-tag fix and the outbound-request timeout stand as-is; the concurrent-refresh-race and per-session-rate-limiter fixes were superseded during the merge by the per-user OAuth work's more general versions of the same fix (`refreshUserToken`'s dedupe, `getRateLimiter(slug)`); `.env.example`'s dead `RAILWAY_API_TOKEN` block removal carried forward. See CHANGELOG.md.
 - [x] **HTTP endpoints authenticated (2026-08-12, URGENT security fix, superseded by the per-user OAuth entry above):** `/mcp` and `/sse` were completely open in production — anyone with the URL got all 47 tools with the org's OAuth token (full member PII plus write tools). `/oauth/authorize` and `/oauth/status` were equally open. Originally fixed with a secret-path route (`MCP_URL_SECRET`) plus a Bearer `MCP_AUTH_TOKEN` check — but `MCP_URL_SECRET` was never set on Railway, so this deployed as an outage rather than a fix, which is why the per-user OAuth work above replaces it rather than patching it. Streamable HTTP session cap (100 concurrent) carried forward. See CHANGELOG.md.
@@ -57,28 +68,21 @@ your own record only behind your own bearer. `/health` is unauthenticated livene
 
 ## To-Do
 
-- [ ] **URGENT — coordinate the per-user-OAuth deploy.** Unlike the previous fix, the
-  connector is *already* dark (production is down right now, and has been since the
-  URL-secret deploy), so there's no "second outage" risk to sequence around — but these
-  steps still need to happen, roughly in order:
-  1. Set `MCP_TOKEN_SIGNING_SECRET` on Railway (`openssl rand -base64 48`) — recommended,
-     not required (a secret is auto-generated and persisted if absent, but explicit avoids
-     the ephemeral-secret failure mode entirely).
-  2. Delete `MCP_URL_SECRET` and `MCP_AUTH_TOKEN` from Railway env — dead vars, no code
-     reads them anymore.
-  3. Confirm the NationBuilder app's registered OAuth callback is still exactly
-     `https://<railway-domain>/oauth/callback` (Settings → Developer → Your apps) — the
-     code deliberately never moved this path, so no NationBuilder-side change *should* be
-     needed, but it's worth eyeballing.
-  4. Deploy this branch to `main`.
-  5. **Every team member (and every non-team person using this MCP) adds their own
+- [x] **Per-user-OAuth deploy coordination** — done. Live in production: `MCP_TOKEN_SIGNING_SECRET`
+  is set on Railway, `MCP_URL_SECRET`/`MCP_AUTH_TOKEN` are gone, and at least one person
+  (Joshua Canter) is confirmed connected via `connection_status` with a healthy refresh
+  chain, exercising `search_people`/`advanced_search` live. This section previously said
+  production was down; that was stale as of 2026-08-13.
+  Still outstanding from the original list, none blocking:
+  1. Confirm the NationBuilder app's registered OAuth callback is still exactly
+     `https://<railway-domain>/oauth/callback` (Settings → Developer → Your apps).
+  2. **Every team member (and every non-team person using this MCP) adds their own
      personal claude.ai connector** pointed at the bare `https://…/mcp` URL and completes
-     the NationBuilder login themselves. This is a one-time re-add per person — there is no
-     org-wide connector anymore.
-  6. **Acceptance test:** have one person run a write tool, then check NationBuilder's own
-     audit log and confirm it names that person, not a shared service account. That's the
-     actual point of this whole change.
-  7. Once at least two people are confirmed working, remove `NATIONBUILDER_ACCESS_TOKEN`/
+     the NationBuilder login themselves, if they haven't already.
+  3. **Full acceptance test:** have a second person run a write tool, then check
+     NationBuilder's own audit log and confirm it names that person, not a shared service
+     account.
+  4. Once at least two people are confirmed working, remove `NATIONBUILDER_ACCESS_TOKEN`/
      `NATIONBUILDER_REFRESH_TOKEN` from Railway if either is still set (HTTP mode already
      refuses to boot with them present, so this is really just tidying env vars, not a
      behavior change).

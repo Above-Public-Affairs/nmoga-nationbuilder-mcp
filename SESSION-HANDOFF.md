@@ -1,5 +1,50 @@
 # Session Handoff
 
+## Where we are (2026-08-13)
+
+Per-user NationBuilder OAuth (below) is confirmed **live and working** in production —
+this session verified it directly: `connection_status` shows a healthy connection with a
+good refresh chain, and both `search_people` and `advanced_search` returned real data with
+correct pagination warnings. That closes out the "merged, not yet deployed" uncertainty
+the section below opens with.
+
+This session started from a user-reported error digest (4 distinct errors, 11 total
+occurrences) for this connector and investigated each:
+
+- **`startup: no MCP_URL_SECRET and no MCP_AUTH_TOKEN` (auth_error, 1×)** — stale. That
+  message string doesn't exist in the current codebase; it's from the URL-secret commit
+  (`990f436`) that was live only between the 19:57 and 23:13 deploys on 2026-08-12, before
+  the per-user OAuth work replaced that gate. Confirmed via Railway env: OAuth is
+  configured, no static NationBuilder token is set, current build boots clean.
+- **`search_people failed` (5×) and `advanced_search failed` (4×)** — stale. Both tools
+  work correctly against production right now (verified live, see above). Almost certainly
+  from the same chaotic 2026-08-12 afternoon (eight deploys in seven hours) hitting filter
+  params (`state`/`city`/`has_email`/`has_phone`) that were confirmed unsupported and
+  removed that same day.
+- **`nationbuilder_client: HTTP 500 after 3 attempts` (api_error, 1×)** — a real but benign
+  NationBuilder-side blip; the retry logic did its job and the report is correctly
+  throttled.
+
+While investigating, found a **real, currently-live bug the error reporter wasn't
+catching**: Railway deploy logs showed one user (`18afd827`) hitting `MAX_SESSIONS_PER_USER`
+(10) and then getting roughly 50 consecutive `503`s over 14 minutes, because claude.ai's
+connector never sends `DELETE` — idle sessions only cleared via a 30-minute reaper, so
+opening a few conversations in that window was enough to lock someone out of their own
+connector until the reaper caught up. This failure path filed no error report at all
+(a `503` there isn't wired to `reportError`), so it was invisible in the dashboard that
+prompted this session.
+
+**Fixed:** hitting the per-user session cap now evicts that same person's own
+least-recently-used session (via the existing `sessionLastSeen` map and `dropSession()`
+helper) instead of refusing the new one. Cap raised 10 → 20, idle reaper shortened
+30min → 15min. The separate global cap (100, shared across everyone) still refuses — it
+would be wrong to evict a *different* person's session to make room — but now files a
+throttled `api_error` report instead of a bare log line, since actually filling the global
+pool is a real capacity signal worth seeing. Change is contained to `src/index.ts`; clean
+`tsc` build. **Not yet live-verified against an actual session pile-up** — the fix logic
+mirrors the exact code path that produced the 50-503 incident in the logs, but nobody has
+reproduced 20+ concurrent sessions for one person against the deployed version yet.
+
 ## Update (2026-08-12, fourth session) — per-user NationBuilder OAuth, merged, not yet deployed
 
 The URL-secret fix described in the section below **did deploy** (Railway auto-deployed
