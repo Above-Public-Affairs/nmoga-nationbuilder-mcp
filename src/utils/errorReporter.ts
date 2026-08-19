@@ -61,6 +61,52 @@ function baseContext(): Record<string, unknown> {
   return ctx;
 }
 
+/**
+ * Request facts the NationBuilder client stamps onto the Error it throws, so
+ * that a `tool_error` report picks them up automatically.
+ *
+ * The problem this solves: ~40 tool call sites file `tool_error` with nothing
+ * but the caught error in hand, so their reports carried a bare
+ * "list_pages failed" with no status and no endpoint — while the client's own
+ * `api_error` report carried the status but is globally throttled and names no
+ * tool. The two could not be joined, which made a real 400 (an unsupported
+ * `page_type` filter) indistinguishable from a NationBuilder outage in the
+ * daily digest. Stamping the error means every existing call site gains the
+ * status/path for free, with no change at any of them.
+ *
+ * A Symbol key (not a plain property) keeps this off JSON.stringify and out of
+ * enumerable iteration, so it can't leak into a log line or a response body
+ * that happens to serialize the error.
+ *
+ * This lives here rather than in the client because the client already imports
+ * this module; putting it here keeps that dependency one-directional.
+ */
+const ERROR_META = Symbol.for("nmoga.nationbuilder.errorMeta");
+
+export interface ErrorMeta {
+  /** HTTP status of the final attempt, or null if no response ever arrived. */
+  status?: number | null;
+  /** Path only, IDs collapsed, query string dropped — see safePath(). */
+  path?: string;
+  method?: string;
+  attempts?: number;
+}
+
+export function attachErrorMeta(error: unknown, meta: ErrorMeta): void {
+  if (error === null || typeof error !== "object") return;
+  try {
+    (error as Record<PropertyKey, unknown>)[ERROR_META] = meta;
+  } catch {
+    /* frozen or exotic error object — this metadata is strictly best-effort */
+  }
+}
+
+export function readErrorMeta(error: unknown): ErrorMeta | undefined {
+  if (error === null || typeof error !== "object") return undefined;
+  const meta = (error as Record<PropertyKey, unknown>)[ERROR_META];
+  return meta !== null && typeof meta === "object" ? (meta as ErrorMeta) : undefined;
+}
+
 export interface ReportParams {
   category: string;
   message: string;
@@ -76,7 +122,10 @@ function buildBody(params: ReportParams): string {
     message: scrub(params.message).slice(0, 500),
     provider: params.provider,
     rawError: flatten(params.rawError),
-    context: { ...baseContext(), ...params.context },
+    // Precedence: base facts, then anything the thrown error carries, then the
+    // caller's own context — so an explicit context key always wins, as the
+    // baseContext() comment above already promises.
+    context: { ...baseContext(), ...readErrorMeta(params.rawError), ...params.context },
   });
 }
 

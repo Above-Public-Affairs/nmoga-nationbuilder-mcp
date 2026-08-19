@@ -20,16 +20,18 @@ export function registerPageTools(
     "list_pages",
     {
       title: "List Pages",
-      description: "List website and landing pages in NationBuilder with optional filters.",
+      description:
+        "List website and landing pages in NationBuilder. Filterable by status only. " +
+        "Does not support filtering by page type — `page_type` is not a filterable " +
+        "attribute on NationBuilder's V2 `pages` resource (it 400s: \"Tried to filter on " +
+        "attribute :page_type, but could not find an attribute with that name\"), and V2 " +
+        "does not return it on the record either, so it has been removed rather than " +
+        "shipped broken.",
       inputSchema: {
-        page_type: z
-          .string()
-          .optional()
-          .describe("Filter by page type (e.g. 'basic', 'event', 'petition', 'donation', 'survey')"),
         status: z
           .string()
           .optional()
-          .describe("Filter by page status"),
+          .describe("Filter by page status (e.g. 'published', 'unlisted')"),
         page_size: z
           .number()
           .int()
@@ -55,7 +57,11 @@ export function registerPageTools(
 
         const filter: Record<string, string | Record<string, string>> = {};
 
-        if (params.page_type) filter.page_type = params.page_type;
+        // Only `status` here. A `page_type` filter was removed: NationBuilder's
+        // V2 PageResource rejects it outright with a 400 rather than ignoring
+        // it, so every call that passed it was a hard failure. Same class of
+        // bug as the state/city/has_email/has_phone params removed from
+        // search_people — see the note in tools/signups.ts.
         if (params.status) filter.status = params.status;
 
         if (Object.keys(filter).length > 0) {

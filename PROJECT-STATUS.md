@@ -35,6 +35,23 @@ your own record only behind your own bearer. `/health` is unauthenticated livene
 
 ## Completed
 
+- [x] **Error-digest triage: `list_pages`'s broken filter, a dead retry sleep, and undiagnosable `tool_error` reports (2026-08-19):**
+  triaged a 3-error digest whose own suggested diagnosis (NationBuilder outage /
+  expired credentials) was wrong — verified live that auth was healthy and
+  `search_people`/`list_sites` worked throughout. Found one real bug: `list_pages`'s
+  `page_type` filter parameter is not a filterable attribute on NationBuilder's V2
+  `pages` resource and 400s on every call that used it (reproduced live); removed it,
+  same fix class as the 2026-04-28 `search_people` filter cleanup. Also fixed the
+  retry client sleeping through a backoff on the final attempt before giving up
+  (5xx: 4s, 429: up to 30s of dead latency per exhausted request — the 2026-08-18
+  `HTTP 500 after 3 attempts` log entry is the fingerprint) and gave every
+  `tool_error` report the HTTP status + endpoint the client already knows, so the
+  next digest is diagnosable without a Railway-log archaeology session. Verified
+  with a 16-check harness against the compiled client (stubbed fetch): exhausted
+  retries, status/path propagation, PII exclusion from context. See CHANGELOG.md.
+  The `search_people failed` entry in the same digest could not be attributed —
+  works live now; the raw error text lives in the Error Reporter's Postgres, not
+  reachable from this session.
 - [x] **Per-user session cap now evicts instead of locking people out (2026-08-13):**
   live production logs showed one person hit the per-user cap (10) and then get ~50
   consecutive `503`s over 14 minutes, because claude.ai's connector never sends `DELETE`

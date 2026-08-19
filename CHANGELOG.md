@@ -1,5 +1,66 @@
 # Changelog
 
+## [2026-08-19]
+
+Triage of a three-error digest (`list_pages failed`, `search_people failed`,
+`nationbuilder_client: HTTP 500 after 3 attempts`). The digest's own suggested
+diagnosis — NationBuilder outage or expired credentials — was wrong on both
+counts: auth was healthy and `search_people`/`list_sites` returned live data
+throughout. One of the three was a real bug in our own code.
+
+### Fixed
+- **`list_pages`'s `page_type` filter was a guaranteed hard failure.** The
+  parameter was advertised in the tool's input schema, but `page_type` is not a
+  filterable attribute on NationBuilder's V2 `pages` resource — it returns
+  `400 bad_request: "Api::V2::PageResource: Tried to filter on attribute
+  :page_type, but could not find an attribute with that name"` (reproduced live
+  against the nation). Every call that passed it failed outright. Removed the
+  parameter rather than shipping it broken, which is exactly what was already
+  done for `search_people`'s `state`/`city`/`has_email`/`has_phone` params on
+  2026-04-28 — that sweep just never reached `pages.ts`. V2 also never returns
+  `page_type` on the record (verified across 10 pages, none carried it), so
+  `formatPage`'s `Type:` line was dead code and the attribute is gone from
+  `PageAttributes` too. `status` filtering is unaffected and still works.
+- **The retry loop slept before giving up.** On the final attempt the 5xx branch
+  logged `retrying in 4000ms` and then waited those 4 seconds before exiting the
+  loop — a retry that could never happen. The 2026-08-18 production 500 incident
+  shows the fingerprint exactly: `1000ms`, `2000ms`, `4000ms`, no fourth attempt.
+  The 429 branch had the same shape but worse, sleeping up to `maxBackoffMs`
+  (30s) on the final attempt. Both now skip the backoff when no attempt remains,
+  cutting 4s (5xx) to 30s (429) of pure dead latency off every exhausted request.
+  Verified: an exhausted triple-500 now takes ~3.0s of backoff instead of ~7.0s.
+- **An exhausted 5xx/429 threw `Request failed after retries` with no detail.**
+  Those two branches leave the loop via `break` without an exception, so
+  `lastError` was null and both the caller's message and the filed report's
+  `rawError` were empty — the least diagnosable outcome landing on the least
+  diagnosable path. Both now carry the status, method, and path.
+
+### Added
+- **`tool_error` reports now carry the HTTP status and endpoint.** This is why
+  the digest above was not diagnosable: a `tool_error` said only
+  `"list_pages failed"`, while the client's `api_error` had the status but is
+  globally throttled and names no tool, so the two could not be joined — a real
+  400 in our own schema was indistinguishable from a NationBuilder outage. The
+  client now stamps `{ status, path, method, attempts }` onto the error it
+  throws (`attachErrorMeta`/`readErrorMeta` in `utils/errorReporter.ts`), and
+  `buildBody` merges those into every report's context automatically. All ~40
+  existing `reportError` call sites gain the fields with no change at any of
+  them; caller-supplied context keys still win. The metadata hangs off a
+  `Symbol.for` key so it stays out of `JSON.stringify` and enumerable
+  iteration, and only `safePath()` output is attached — never the query string,
+  which carries member PII in its filter values.
+
+### Not changed
+- The `HTTP 500 after 3 attempts` report itself was a genuine, transient
+  NationBuilder-side blip (2026-08-18 ~17:11 UTC, one request, three attempts;
+  another user was making successful calls six minutes later and token refreshes
+  ran clean throughout). Retry logic and the 30-minute throttle both behaved
+  correctly — no change warranted.
+- `search_people failed` from the same digest could not be attributed. It works
+  correctly live; the raw error text needed to settle it lives in the Error
+  Reporter's Postgres, which was not reachable from this session. The
+  `tool_error` change above means the next occurrence will say what it was.
+
 ## [2026-08-13]
 
 ### Fixed

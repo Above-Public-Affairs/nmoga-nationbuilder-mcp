@@ -1,49 +1,63 @@
 # Session Handoff
 
-## Where we are (2026-08-13)
+## Where we are (2026-08-19)
 
-Per-user NationBuilder OAuth (below) is confirmed **live and working** in production —
-this session verified it directly: `connection_status` shows a healthy connection with a
-good refresh chain, and both `search_people` and `advanced_search` returned real data with
-correct pagination warnings. That closes out the "merged, not yet deployed" uncertainty
-the section below opens with.
+Per-user NationBuilder OAuth is still live and healthy in production — reverified directly
+this session (`connection_status`: good refresh chain, no reauth needed) before touching
+anything.
 
-This session started from a user-reported error digest (4 distinct errors, 11 total
-occurrences) for this connector and investigated each:
+Triaged a fresh 3-error digest (`list_pages failed`, `search_people failed`,
+`nationbuilder_client: HTTP 500 after 3 attempts`), all dated 2026-08-18/19 — i.e. *after*
+the per-user OAuth deploy, not a repeat of the stale 2026-08-12 digest the previous
+session already closed out below. The digest's own suggested diagnosis (NationBuilder
+outage, expired credentials) was wrong: `connection_status` was healthy and
+`search_people`/`list_sites` returned real data live throughout.
 
-- **`startup: no MCP_URL_SECRET and no MCP_AUTH_TOKEN` (auth_error, 1×)** — stale. That
-  message string doesn't exist in the current codebase; it's from the URL-secret commit
-  (`990f436`) that was live only between the 19:57 and 23:13 deploys on 2026-08-12, before
-  the per-user OAuth work replaced that gate. Confirmed via Railway env: OAuth is
-  configured, no static NationBuilder token is set, current build boots clean.
-- **`search_people failed` (5×) and `advanced_search failed` (4×)** — stale. Both tools
-  work correctly against production right now (verified live, see above). Almost certainly
-  from the same chaotic 2026-08-12 afternoon (eight deploys in seven hours) hitting filter
-  params (`state`/`city`/`has_email`/`has_phone`) that were confirmed unsupported and
-  removed that same day.
-- **`nationbuilder_client: HTTP 500 after 3 attempts` (api_error, 1×)** — a real but benign
-  NationBuilder-side blip; the retry logic did its job and the report is correctly
-  throttled.
+- **`list_pages failed` — real bug, fixed.** `page_type` was advertised as a filter
+  parameter but NationBuilder's V2 `pages` resource rejects it outright: `400
+  bad_request: "Tried to filter on attribute :page_type, but could not find an attribute
+  with that name"` — reproduced live. Removed the parameter (schema, filter construction,
+  the dead `Type:` display line, the type definition). Same fix class as the 2026-04-28
+  `search_people` filter cleanup; that sweep just never reached `pages.ts`. `status`
+  filtering still works.
+- **`nationbuilder_client: HTTP 500 after 3 attempts` — real, transient, correctly handled.**
+  Pinned to 2026-08-18 ~17:11 UTC in Railway logs: one request, three attempts
+  (`1000ms`/`2000ms`/`4000ms` backoff), then gave up. A different user was making
+  successful calls six minutes later; token refreshes ran clean throughout. No action
+  needed on this occurrence — but see the retry-loop fix below, found while reading this
+  exact log line.
+- **`search_people failed` — could not be attributed.** Works correctly live right now.
+  The raw error text that would settle what actually happened lives in the Error
+  Reporter's Postgres (`error_logs` table); reaching it needed either a bulk Railway
+  env-var read or `railway ssh` into the Error Reporter's Postgres service, and the
+  permission classifier blocked both in this session. Whoever picks this up next: get an
+  allowlisted way to read that table, or just wait — the fix below means the next
+  occurrence of this exact tool will self-diagnose.
 
-While investigating, found a **real, currently-live bug the error reporter wasn't
-catching**: Railway deploy logs showed one user (`18afd827`) hitting `MAX_SESSIONS_PER_USER`
-(10) and then getting roughly 50 consecutive `503`s over 14 minutes, because claude.ai's
-connector never sends `DELETE` — idle sessions only cleared via a 30-minute reaper, so
-opening a few conversations in that window was enough to lock someone out of their own
-connector until the reaper caught up. This failure path filed no error report at all
-(a `503` there isn't wired to `reportError`), so it was invisible in the dashboard that
-prompted this session.
+**Also fixed, found by reading the retry code while chasing the 500 above:**
 
-**Fixed:** hitting the per-user session cap now evicts that same person's own
-least-recently-used session (via the existing `sessionLastSeen` map and `dropSession()`
-helper) instead of refusing the new one. Cap raised 10 → 20, idle reaper shortened
-30min → 15min. The separate global cap (100, shared across everyone) still refuses — it
-would be wrong to evict a *different* person's session to make room — but now files a
-throttled `api_error` report instead of a bare log line, since actually filling the global
-pool is a real capacity signal worth seeing. Change is contained to `src/index.ts`; clean
-`tsc` build. **Not yet live-verified against an actual session pile-up** — the fix logic
-mirrors the exact code path that produced the 50-503 incident in the logs, but nobody has
-reproduced 20+ concurrent sessions for one person against the deployed version yet.
+- **Dead sleep on the final retry attempt.** The 5xx and 429 branches in
+  `client/nationbuilder.ts` slept the full backoff (up to 4s for 5xx, up to 30s for 429)
+  *before* exiting the retry loop on the last attempt — a retry that was never coming.
+  Both now skip the sleep when no attempt remains. Verified: an exhausted triple-500 now
+  takes ~3.0s of backoff, not ~7.0s.
+- **`tool_error` reports had no HTTP status or endpoint** — this is *why* the digest above
+  was undiagnosable from the dashboard alone. A `tool_error` said only `"list_pages
+  failed"`; the client's own `api_error` had the status but is globally throttled and
+  names no tool, so the two couldn't be joined. Fixed by having the client stamp
+  `{status, path, method, attempts}` onto the error it throws
+  (`attachErrorMeta`/`readErrorMeta`, `Symbol.for`-keyed so it can't leak into
+  `JSON.stringify` or a response body); `buildBody` now merges that into every report's
+  context automatically. All ~40 existing `reportError` call sites gain the fields with
+  zero changes to any of them. Only `safePath()` output is attached, never the query
+  string — NationBuilder filter values are member PII.
+
+**Verified** with a 16-check harness against the compiled client (real `dist/`, stubbed
+`fetch`) covering: exhausted-5xx timing and error detail, the exact `list_pages` 400 case
+end-to-end including that the filter *value* never reaches the report context, exhausted-429
+timing, and that the success path is unchanged. Clean `tsc` build. **Not yet committed** —
+sitting as working-tree changes on `claude/nationbuilder-mcp-errors-00e1ac` as of this
+handoff; commit/push/deploy is the very next step.
 
 ## Update (2026-08-12, fourth session) — per-user NationBuilder OAuth, merged, not yet deployed
 

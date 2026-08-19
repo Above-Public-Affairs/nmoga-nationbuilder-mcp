@@ -394,7 +394,6 @@ export function formatPage(resource: JsonApiResource<PageAttributes>): string {
   const lines: string[] = [];
   lines.push(`**${a.name || "Page"}** (ID: ${resource.id})`);
   if (a.slug) lines.push(`  Slug: ${a.slug}`);
-  if (a.page_type) lines.push(`  Type: ${a.page_type}`);
   if (a.status) lines.push(`  Status: ${a.status}`);
   if (a.created_at) lines.push(`  Created: ${formatDate(a.created_at)}`);
   return lines.join("\n");

@@ -295,7 +295,9 @@ export interface MailingAttributes {
 export interface PageAttributes {
   name: string | null;
   slug: string | null;
-  page_type: string | null;
+  // No `page_type`: V2's pages resource neither returns nor filters on it
+  // (verified live against the nation — 10 records, none carried it). The
+  // index signature below still admits it if NationBuilder ever adds it.
   status: string | null;
   created_at: string | null;
   updated_at: string | null;

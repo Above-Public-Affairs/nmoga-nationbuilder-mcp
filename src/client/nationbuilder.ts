@@ -12,7 +12,7 @@ import type {
   QueryParams,
 } from "../types/index.js";
 import { getRateLimiter } from "../utils/rateLimiter.js";
-import { reportError, reportErrorThrottled } from "../utils/errorReporter.js";
+import { attachErrorMeta, reportError, reportErrorThrottled } from "../utils/errorReporter.js";
 
 /**
  * The exact prefix `index.ts`'s tokenGetter throws when no token is
@@ -236,19 +236,37 @@ export function createNationBuilderClient(
         // Handle rate limiting
         if (response.status === 429) {
           lastStatus = 429;
-          await rateLimiter.handleError(429, parseRetryAfterMs(response.headers.get("retry-after")));
-          continue;
+          // Only back off when another attempt is actually coming.
+          // handleError() sleeps for up to maxBackoffMs (30s); on the final
+          // attempt the loop exits straight after this block, so that sleep
+          // was pure dead latency added to a request that had already failed.
+          if (attempt < retryLimit - 1) {
+            await rateLimiter.handleError(429, parseRetryAfterMs(response.headers.get("retry-after")));
+            continue;
+          }
+          console.error("Rate limited (429) on the final attempt — giving up.");
+          break;
         }
 
         // Handle server errors with retry
         if (response.status >= 500) {
           lastStatus = response.status;
-          const waitMs = Math.min(1000 * Math.pow(2, attempt), 10000);
+          // Same final-attempt guard as the 429 branch above. Previously this
+          // slept unconditionally, so an exhausted 5xx logged
+          // "retrying in 4000ms" and then waited those 4s before giving up on
+          // a retry that was never going to happen.
+          if (attempt < retryLimit - 1) {
+            const waitMs = Math.min(1000 * Math.pow(2, attempt), 10000);
+            console.error(
+              `Server error ${response.status}, retrying in ${waitMs}ms...`
+            );
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            continue;
+          }
           console.error(
-            `Server error ${response.status}, retrying in ${waitMs}ms...`
+            `Server error ${response.status} on the final attempt — giving up.`
           );
-          await new Promise((resolve) => setTimeout(resolve, waitMs));
-          continue;
+          break;
         }
 
         // No content (successful delete)
@@ -327,6 +345,21 @@ export function createNationBuilderClient(
 
     const path = safePath(url);
 
+    // One object for both the report and the throw. The 429 and 5xx branches
+    // leave the retry loop via `break` without an exception, so `lastError` is
+    // null on exactly the paths that used to surface to the caller as a bare
+    // "Request failed after retries" and to the digest as a rawError-less row.
+    const failure =
+      lastError ??
+      new Error(
+        lastStatus !== null
+          ? `NationBuilder API error: HTTP ${lastStatus} after ${attemptsMade} attempts (${method} ${path}).`
+          : `NationBuilder request failed after ${attemptsMade} attempts (${method} ${path}).`
+      );
+    // Stamped before any report is filed, so the tool layer's own tool_error —
+    // which only ever sees the thrown error — carries the status and endpoint.
+    attachErrorMeta(failure, { status: lastStatus, path, method, attempts: attemptsMade });
+
     if (noToken) {
       // Scoped per-caller (when userTag is set): one connector with a dead
       // token must not suppress this report for every other connected user
@@ -358,7 +391,7 @@ export function createNationBuilderClient(
       reportErrorThrottled({
         category: "api_error",
         message: `nationbuilder_client: HTTP ${lastStatus} after ${attemptsMade} attempts`,
-        rawError: lastError,
+        rawError: failure,
         context: { method, path, status: lastStatus, attempts: attemptsMade },
         throttleKey: "nb_5xx",
         throttleMs: 30 * 60 * 1000,
@@ -374,12 +407,12 @@ export function createNationBuilderClient(
       reportError({
         category: "api_error",
         message: `nationbuilder_client: ${method} failed with no response after ${attemptsMade} attempts`,
-        rawError: lastError,
+        rawError: failure,
         context: { method, path, attempts: attemptsMade },
       });
     }
 
-    throw lastError || new Error("Request failed after retries");
+    throw failure;
   }
 
   return {
